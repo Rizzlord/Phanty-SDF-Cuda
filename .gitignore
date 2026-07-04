@@ -1,0 +1,53 @@
+# Compiled Object files
+*.slo
+*.lo
+*.o
+
+# python cache files
+*/__pycache__/*
+*.pyc
+*.ini
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+.vscode/
+
+*.un~
+*.swo
+*.swp
+
+build/*
+build-release/*
+_deps/*
+
+.DS_Store
+*.blend
+*.blend1
+
+# C++ build artifacts inside source tree
+src/python/contouring/_contouring_cpp_module*.so
+
+# Oversized result archives (>100MB, exceed GitHub's file size limit)
+results/large-scale-test/large-scale-test.zip
+results/many-shapes-experiment/many-shapes-experiment.zip
+results/noise-performance/noise-performance.zip

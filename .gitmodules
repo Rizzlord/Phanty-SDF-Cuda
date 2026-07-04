@@ -1,0 +1,9 @@
+[submodule "external/polyscope"]
+	path = external/polyscope
+	url = https://github.com/nmwsharp/polyscope.git
+[submodule "external/maximal-empty-spheres"]
+	path = external/maximal-empty-spheres
+	url = https://github.com/sgsellan/maximal-empty-spheres.git
+[submodule "external/sdf-weighted-delaunay"]
+	path = external/sdf-weighted-delaunay
+	url = https://github.com/sgsellan/sdf-weighted-delaunay.git
