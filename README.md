@@ -2,17 +2,13 @@
 
 This repository contains the code for the SIGGRAPH 2026 paper [Dual Contouring of Signed Distance Data](https://gatc.cs.columbia.edu/projects/dual-contouring-of-signed-distance-data.html), by Xiana Carrera, Ningna Wang, Christopher Batty, Oded Stein, and Silvia Sellán.
 
-
-<!-- > [!CAUTION]
-> **This codebase is not being actively maintained, and is provided for replicability purposes only.** If you are looking for the latest version of the implementation of _Dual Contouring of Signed Distance Data_, please use the `dcsdd` function in [Gpytoolbox](https://gpytoolbox.org/latest/dcsdd/). -->
-
 > [!CAUTION]
 > This code was tested on macOS only. If you encounter issues with other platforms, please contact [x.carrera@columbia.edu](mailto:x.carrera@columbia.edu).
 
 
 We propose an algorithm to reconstruct explicit polygonal meshes from discretely sampled Signed Distance Function (SDF) data, which is especially effective at recovering sharp features.Building on the traditional Dual Contouring of Hermite Data method, we design and solve a quadratic optimization problem to decide the optimal placement of the mesh's vertices within each cell of a regular grid. Critically, this optimization relies solely on discretely sampled SDF data, without requiring arbitrary access to the function, gradient information, or training on large-scale datasets. Our method sets a new state of the art in surface reconstruction from SDFs at medium and high resolutions, and opens the door for applications in 3D modeling and design.
 
-![Teaser](images/teaser.pdf)
+![Teaser](images/teaser.png)
 
 
 ## Installation
