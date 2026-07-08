@@ -758,7 +758,8 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
         init_voxel_exterior_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext);
         CUDA_CHECK_SDF(cudaGetLastError());
 
-        for (int iter = 0; iter < 40; ++iter) {
+        int max_iters = vres * 3;
+        for (int iter = 0; iter < max_iters; ++iter) {
             int h_changed = 0;
             CUDA_CHECK_SDF(cudaMemcpy(d_changed, &h_changed, sizeof(int), cudaMemcpyHostToDevice));
             flood_fill_voxel_exterior_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext, d_changed);
@@ -777,7 +778,7 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
         init_voxel_labels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels);
         CUDA_CHECK_SDF(cudaGetLastError());
 
-        for (int iter = 0; iter < 40; ++iter) {
+        for (int iter = 0; iter < max_iters; ++iter) {
             int h_changed = 0;
             CUDA_CHECK_SDF(cudaMemcpy(d_changed, &h_changed, sizeof(int), cudaMemcpyHostToDevice));
             propagate_voxel_labels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, d_changed);

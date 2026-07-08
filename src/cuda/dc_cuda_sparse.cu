@@ -304,7 +304,7 @@ __global__ void mark_active_bricks_kernel(
         }
     }
 
-    d_active_brick_flags[b_idx] = (has_neg && has_pos && close_to_surface) ? 1 : 0;
+    d_active_brick_flags[b_idx] = (has_neg && has_pos) ? 1 : 0;
 }
 
 __device__ inline bool sparse_is_thin_edge(
@@ -356,24 +356,19 @@ __global__ void mark_active_cells_sparse_kernel(
         if (ix < params.nx - 1 && iy < params.ny - 1 && iz < params.nz - 1) {
             bool has_neg = false;
             bool has_pos = false;
-            bool close_to_surface = false;
             bool very_close = false;
-            float cell_diag = sqrtf(params.vx * params.vx + params.vy * params.vy + params.vz * params.vz);
-            float corner_vals[8];
 
             for (int k = 0; k < 8; ++k) {
                 int g_ix = ix + corner_offsets[k][0];
                 int g_iy = iy + corner_offsets[k][1];
                 int g_iz = iz + corner_offsets[k][2];
                 float val = d_sdf[sparse_grid_index(g_ix, g_iy, g_iz, params.nx, params.ny, params.nz)];
-                corner_vals[k] = val;
                 if (val < 0.0f) has_neg = true;
                 if (val > 0.0f) has_pos = true;
-                if (fabsf(val) <= 2.0f * cell_diag) close_to_surface = true;
                 if (fabsf(val) <= 0.45f * params.vx) very_close = true;
             }
 
-            bool is_active = (has_neg && has_pos && close_to_surface) || very_close;
+            bool is_active = (has_neg && has_pos) || very_close;
 
             if (is_active) {
                 d_active_cell_flags[sparse_cell_index(ix, iy, iz, params.nx, params.ny, params.nz)] = 1;

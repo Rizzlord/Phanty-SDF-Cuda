@@ -266,8 +266,6 @@ __global__ void mark_active_cells_kernel(
 
     bool has_neg = false;
     bool has_pos = false;
-    bool close_to_surface = false;
-    float cell_diag = sqrtf(params.vx * params.vx + params.vy * params.vy + params.vz * params.vz);
 
     for (int c = 0; c < 8; ++c) {
         int g_ix = ix + corner_offsets[c][0];
@@ -277,10 +275,9 @@ __global__ void mark_active_cells_kernel(
         float val = d_sdf[g_idx];
         if (val < 0.0f) has_neg = true;
         if (val > 0.0f) has_pos = true;
-        if (fabsf(val) <= 2.0f * cell_diag) close_to_surface = true;
     }
 
-    d_active_flags[cell_idx] = (has_neg && has_pos && close_to_surface) ? 1 : 0;
+    d_active_flags[cell_idx] = (has_neg && has_pos) ? 1 : 0;
 }
 
 __global__ void compute_vertices_kernel(
