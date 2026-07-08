@@ -101,7 +101,32 @@
                 <input type="range" id="scale-slider" min="0.60" max="0.95" step="0.05" value="0.85" class="custom-slider">
             </div>
 
+            <h2 class="panel-title mt-6">3. Post-Processing</h2>
+
+            <div class="setting-group checkbox-group">
+                <label class="custom-checkbox-label">
+                    <input type="checkbox" id="remove-floaters-cb" class="custom-checkbox">
+                    <span class="checkbox-box"></span>
+                    <div class="checkbox-text">
+                        <span class="checkbox-title">Remove Floaters (Keep 1 Shell)</span>
+                        <span class="checkbox-desc">Isolates the single largest connected component and discards disconnected floating faces.</span>
+                    </div>
+                </label>
+            </div>
+
+            <div class="setting-group checkbox-group mt-3">
+                <label class="custom-checkbox-label">
+                    <input type="checkbox" id="close-holes-cb" class="custom-checkbox">
+                    <span class="checkbox-box"></span>
+                    <div class="checkbox-text">
+                        <span class="checkbox-title">Close Holes (Watertight)</span>
+                        <span class="checkbox-desc">Traces boundary loops and triangulates open edges to create a 100% watertight mesh.</span>
+                    </div>
+                </label>
+            </div>
+
             <div class="action-buttons">
+
                 <button id="start-btn" class="glow-btn primary-btn" disabled>
                     <span class="btn-text">Extract Dual Contouring Mesh</span>
                     <div id="spinner" class="spinner hidden"></div>

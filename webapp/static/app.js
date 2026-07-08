@@ -240,12 +240,18 @@ startBtn.addEventListener('click', async () => {
 
         const backendVal = document.querySelector('input[name="backend"]:checked').value;
         const brickSizeVal = document.querySelector('input[name="brick_size"]:checked').value;
+        const removeFloatersVal = document.getElementById('remove-floaters-cb').checked;
+        const closeHolesVal = document.getElementById('close-holes-cb').checked;
+
         const formData = new FormData();
         formData.append('file', selectedFile);
         formData.append('res', resSlider.value);
         formData.append('backend', backendVal);
         formData.append('brick_size', brickSizeVal);
         formData.append('scale_factor', scaleSlider.value);
+        formData.append('remove_floaters', removeFloatersVal);
+        formData.append('close_holes', closeHolesVal);
+
 
         const res = await fetch('/api/extract', {
             method: 'POST',

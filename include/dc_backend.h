@@ -25,6 +25,9 @@ struct DualContouringMesh {
     std::vector<int> faces;
 };
 
+DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_holes, bool remove_floaters);
+
+
 class ISdfDeviceSampler {
 public:
     virtual ~ISdfDeviceSampler() = default;

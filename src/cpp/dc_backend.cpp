@@ -123,3 +123,247 @@ DualContouringMesh CpuDualContouringBackend::extract(const DenseSdfGrid& grid, D
 
     return mesh;
 }
+
+DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_holes, bool remove_floaters) {
+    if (mesh.vertices.empty() || mesh.faces.empty() || (!close_holes && !remove_floaters)) {
+        return mesh;
+    }
+
+    int num_vertices = (int)(mesh.vertices.size() / 3);
+    int num_faces = (int)(mesh.faces.size() / 4);
+
+    struct UndirectedEdge {
+        int u, v; // u < v
+        int face_idx;
+        int edge_idx; // 0, 1, 2, or 3
+        bool operator<(const UndirectedEdge& o) const {
+            if (u != o.u) return u < o.u;
+            return v < o.v;
+        }
+    };
+
+    std::vector<UndirectedEdge> all_edges;
+    all_edges.reserve(num_faces * 4);
+    for (int f = 0; f < num_faces; ++f) {
+        for (int e = 0; e < 4; ++e) {
+            int u = mesh.faces[4 * f + e];
+            int v = mesh.faces[4 * f + (e + 1) % 4];
+            if (u == v) continue;
+            UndirectedEdge edge;
+            edge.u = std::min(u, v);
+            edge.v = std::max(u, v);
+            edge.face_idx = f;
+            edge.edge_idx = e;
+            all_edges.push_back(edge);
+        }
+    }
+
+    std::sort(all_edges.begin(), all_edges.end());
+
+    std::vector<int> face_neighbors(num_faces * 4, -1);
+    std::vector<int> neighbor_counts(num_faces, 0);
+
+    struct DirectedBoundaryEdge {
+        int u, v;
+        int face_idx;
+    };
+    std::vector<DirectedBoundaryEdge> boundary_edges;
+
+    size_t i = 0;
+    while (i < all_edges.size()) {
+        size_t j = i + 1;
+        while (j < all_edges.size() && all_edges[j].u == all_edges[i].u && all_edges[j].v == all_edges[i].v) {
+            j++;
+        }
+
+        size_t count = j - i;
+        if (count == 1) {
+            int f = all_edges[i].face_idx;
+            int e = all_edges[i].edge_idx;
+            int u = mesh.faces[4 * f + e];
+            int v = mesh.faces[4 * f + (e + 1) % 4];
+            boundary_edges.push_back({u, v, f});
+        } else {
+            for (size_t x = i; x < j; ++x) {
+                for (size_t y = x + 1; y < j; ++y) {
+                    int f1 = all_edges[x].face_idx;
+                    int f2 = all_edges[y].face_idx;
+                    if (neighbor_counts[f1] < 4) face_neighbors[4 * f1 + neighbor_counts[f1]++] = f2;
+                    if (neighbor_counts[f2] < 4) face_neighbors[4 * f2 + neighbor_counts[f2]++] = f1;
+                }
+            }
+        }
+        i = j;
+    }
+
+    std::vector<int> kept_faces;
+    kept_faces.reserve(num_faces);
+    std::vector<int> face_component(num_faces, 0);
+    int largest_comp_idx = 0;
+
+    if (remove_floaters) {
+        std::fill(face_component.begin(), face_component.end(), -1);
+        std::vector<int> component_sizes;
+        std::vector<int> queue(num_faces);
+
+        int num_components = 0;
+        for (int f = 0; f < num_faces; ++f) {
+            if (face_component[f] != -1) continue;
+
+            int comp_idx = num_components++;
+            int q_head = 0;
+            int q_tail = 0;
+
+            queue[q_tail++] = f;
+            face_component[f] = comp_idx;
+            int comp_size = 0;
+
+            while (q_head < q_tail) {
+                int curr = queue[q_head++];
+                comp_size++;
+
+                int n_start = 4 * curr;
+                int n_count = neighbor_counts[curr];
+                for (int n = 0; n < n_count; ++n) {
+                    int neighbor = face_neighbors[n_start + n];
+                    if (neighbor != -1 && face_component[neighbor] == -1) {
+                        face_component[neighbor] = comp_idx;
+                        queue[q_tail++] = neighbor;
+                    }
+                }
+            }
+            component_sizes.push_back(comp_size);
+        }
+
+        largest_comp_idx = -1;
+        int max_size = -1;
+        for (int c = 0; c < num_components; ++c) {
+            if (component_sizes[c] > max_size) {
+                max_size = component_sizes[c];
+                largest_comp_idx = c;
+            }
+        }
+
+        for (int f = 0; f < num_faces; ++f) {
+            if (face_component[f] == largest_comp_idx) {
+                kept_faces.push_back(f);
+            }
+        }
+    } else {
+        for (int f = 0; f < num_faces; ++f) {
+            kept_faces.push_back(f);
+        }
+    }
+
+    std::vector<int> active_faces;
+    active_faces.reserve(kept_faces.size() * 4);
+    for (int f : kept_faces) {
+        for (int k = 0; k < 4; ++k) {
+            active_faces.push_back(mesh.faces[4 * f + k]);
+        }
+    }
+
+    if (close_holes && !boundary_edges.empty()) {
+        std::vector<std::vector<int>> adj_boundary(num_vertices);
+        for (const auto& edge : boundary_edges) {
+            if (!remove_floaters || (remove_floaters && face_component[edge.face_idx] == largest_comp_idx)) {
+                adj_boundary[edge.u].push_back(edge.v);
+            }
+        }
+
+        for (int v_start = 0; v_start < num_vertices; ++v_start) {
+            while (!adj_boundary[v_start].empty()) {
+                int curr = v_start;
+                std::vector<int> loop;
+                loop.push_back(curr);
+
+                bool closed = false;
+                while (true) {
+                    if (adj_boundary[curr].empty()) {
+                        break;
+                    }
+                    int next = adj_boundary[curr].back();
+                    adj_boundary[curr].pop_back();
+
+                    if (next == v_start) {
+                        closed = true;
+                        break;
+                    }
+
+                    auto it = std::find(loop.begin(), loop.end(), next);
+                    if (it != loop.end()) {
+                        std::vector<int> sub_loop(it, loop.end());
+                        loop.erase(it, loop.end());
+                        if (sub_loop.size() >= 3 && sub_loop.size() <= 64) {
+                            std::vector<int> rev_loop(sub_loop.rbegin(), sub_loop.rend());
+                            if (rev_loop.size() == 3) {
+                                active_faces.push_back(rev_loop[2]);
+                                active_faces.push_back(rev_loop[1]);
+                                active_faces.push_back(rev_loop[0]);
+                                active_faces.push_back(rev_loop[0]);
+                            } else if (rev_loop.size() == 4) {
+                                active_faces.push_back(rev_loop[3]);
+                                active_faces.push_back(rev_loop[2]);
+                                active_faces.push_back(rev_loop[1]);
+                                active_faces.push_back(rev_loop[0]);
+                            } else {
+                                for (size_t idx = 1; idx < rev_loop.size() - 1; ++idx) {
+                                    active_faces.push_back(rev_loop[0]);
+                                    active_faces.push_back(rev_loop[idx]);
+                                    active_faces.push_back(rev_loop[idx + 1]);
+                                    active_faces.push_back(rev_loop[idx + 1]);
+                                }
+                            }
+                        }
+                        curr = next;
+                        loop.push_back(curr);
+                        continue;
+                    }
+
+                    loop.push_back(next);
+                    curr = next;
+                }
+
+                if (closed && loop.size() >= 3 && loop.size() <= 64) {
+                    std::vector<int> rev_loop(loop.rbegin(), loop.rend());
+                    if (rev_loop.size() == 3) {
+                        active_faces.push_back(rev_loop[2]);
+                        active_faces.push_back(rev_loop[1]);
+                        active_faces.push_back(rev_loop[0]);
+                        active_faces.push_back(rev_loop[0]);
+                    } else if (rev_loop.size() == 4) {
+                        active_faces.push_back(rev_loop[3]);
+                        active_faces.push_back(rev_loop[2]);
+                        active_faces.push_back(rev_loop[1]);
+                        active_faces.push_back(rev_loop[0]);
+                    } else {
+                        for (size_t idx = 1; idx < rev_loop.size() - 1; ++idx) {
+                            active_faces.push_back(rev_loop[0]);
+                            active_faces.push_back(rev_loop[idx]);
+                            active_faces.push_back(rev_loop[idx + 1]);
+                            active_faces.push_back(rev_loop[idx + 1]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<int> old_to_new_vertex(num_vertices, -1);
+    DualContouringMesh processed_mesh;
+    processed_mesh.vertices.reserve(mesh.vertices.size());
+    processed_mesh.faces.reserve(active_faces.size());
+
+    for (int old_v : active_faces) {
+        if (old_to_new_vertex[old_v] == -1) {
+            old_to_new_vertex[old_v] = (int)(processed_mesh.vertices.size() / 3);
+            processed_mesh.vertices.push_back(mesh.vertices[3 * old_v + 0]);
+            processed_mesh.vertices.push_back(mesh.vertices[3 * old_v + 1]);
+            processed_mesh.vertices.push_back(mesh.vertices[3 * old_v + 2]);
+        }
+        processed_mesh.faces.push_back(old_to_new_vertex[old_v]);
+    }
+
+    return processed_mesh;
+}
+

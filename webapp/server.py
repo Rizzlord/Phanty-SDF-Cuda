@@ -28,7 +28,9 @@ async def extract_mesh(
     res: int = Form(64),
     backend: str = Form("cuda-sparse"),
     brick_size: int = Form(8),
-    scale_factor: float = Form(0.85)
+    scale_factor: float = Form(0.85),
+    close_holes: bool = Form(False),
+    remove_floaters: bool = Form(False)
 ):
     try:
         if file is None or not hasattr(file, "read"):
@@ -87,6 +89,14 @@ async def extract_mesh(
 
         if len(out_mesh.vertices) == 0 or len(out_mesh.faces) == 0:
             raise ValueError("No zero-crossing surface found in the specified grid resolution.")
+
+        if close_holes or remove_floaters:
+            out_mesh = contouring.postprocess_mesh(out_mesh, close_holes, remove_floaters)
+            stats.vertex_count = len(out_mesh.vertices) // 3
+            stats.face_count = len(out_mesh.faces) // 4
+
+        if len(out_mesh.vertices) == 0 or len(out_mesh.faces) == 0:
+            raise ValueError("No surface remaining after post-processing.")
 
         V_out = np.array(out_mesh.vertices, dtype=np.float32).reshape(-1, 3)
         Q_out = np.array(out_mesh.faces, dtype=np.int32).reshape(-1, 4)

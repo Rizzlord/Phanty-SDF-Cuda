@@ -142,7 +142,11 @@ PYBIND11_MODULE(_contouring_cpp_module, m) {
         .def_readwrite("vertices", &DualContouringMesh::vertices)
         .def_readwrite("faces", &DualContouringMesh::faces);
 
+    m.def("postprocess_mesh", &postprocess_mesh, "Post-process DualContouringMesh to close holes and/or keep single shell",
+        py::arg("mesh"), py::arg("close_holes") = true, py::arg("remove_floaters") = true);
+
     py::class_<DualContouringStats>(m, "DualContouringStats")
+
         .def(py::init<>())
         .def_readwrite("backend", &DualContouringStats::backend)
         .def_readwrite("nx", &DualContouringStats::nx)
