@@ -647,6 +647,34 @@ __global__ void keep_max_label_kernel(int vres, uint8_t* d_voxels, const int* d_
     }
 }
 
+__global__ void apply_solid_voxel_sign_mask_kernel(
+    int nx, int ny, int nz, float ox, float oy, float oz, float vx, float vy, float vz,
+    int vres, float vox_vx, float vox_vy, float vox_vz,
+    const uint8_t* d_voxels, float* d_values
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_voxels = nx * ny * nz;
+    if (idx >= total_voxels) return;
+
+    int ix = idx % nx;
+    int iy = (idx / nx) % ny;
+    int iz = idx / (nx * ny);
+
+    float3 p = make_float3(ox + ix * vx, oy + iy * vy, oz + iz * vz);
+
+    int vbx = max(0, min(vres - 1, (int)floorf((p.x - ox) / vox_vx)));
+    int vby = max(0, min(vres - 1, (int)floorf((p.y - oy) / vox_vy)));
+    int vbz = max(0, min(vres - 1, (int)floorf((p.z - oz) / vox_vz)));
+    size_t v_idx = vbx + (size_t)vres * (vby + (size_t)vres * vbz);
+
+    float val = fabsf(d_values[idx]);
+    if (d_voxels[v_idx] == 1) {
+        d_values[idx] = -val;
+    } else {
+        d_values[idx] = val;
+    }
+}
+
 __global__ void evaluate_sdf_from_solid_kernel(
     int nx, int ny, int nz, float ox, float oy, float oz, float vx, float vy, float vz,
     int vres, float vox_vx, float vox_vy, float vox_vz,
@@ -773,78 +801,60 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
         CUDA_CHECK_SDF(cudaFree(d_ext));
         d_ext = nullptr;
 
-        int* d_labels = nullptr;
-        CUDA_CHECK_SDF(cudaMalloc(&d_labels, (size_t)total_vox * sizeof(int)));
-        init_voxel_labels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels);
+        int gx = max(1, nx / 8);
+        int gy = max(1, ny / 8);
+        int gz = max(1, nz / 8);
+        float bdx = (nx * vx) / gx;
+        float bdy = (ny * vy) / gy;
+        float bdz = (nz * vz) / gz;
+        float margin = 2.0f * fmaxf(vx, fmaxf(vy, vz));
+
+        int num_bins = gx * gy * gz;
+        int* d_bin_counts = nullptr;
+        int* d_bin_offsets = nullptr;
+        int* d_bin_write_counts = nullptr;
+        int* d_bin_triangles = nullptr;
+
+        CUDA_CHECK_SDF(cudaMalloc(&d_bin_counts, (num_bins + 1) * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_bin_offsets, (num_bins + 1) * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_bin_write_counts, num_bins * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMemset(d_bin_counts, 0, (num_bins + 1) * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMemset(d_bin_write_counts, 0, num_bins * sizeof(int)));
+
+        blocks_f = (num_faces + threads - 1) / threads;
+        compute_bin_counts_kernel<<<blocks_f, threads>>>(d_vertices, d_faces, num_faces, gx, gy, gz, ox, oy, oz, bdx, bdy, bdz, margin, d_bin_counts);
         CUDA_CHECK_SDF(cudaGetLastError());
 
-        for (int iter = 0; iter < max_iters; ++iter) {
-            int h_changed = 0;
-            CUDA_CHECK_SDF(cudaMemcpy(d_changed, &h_changed, sizeof(int), cudaMemcpyHostToDevice));
-            propagate_voxel_labels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, d_changed);
+        thrust::device_ptr<int> dev_counts(d_bin_counts);
+        thrust::device_ptr<int> dev_offsets(d_bin_offsets);
+        thrust::exclusive_scan(dev_counts, dev_counts + num_bins + 1, dev_offsets);
+
+        int total_bin_triangles = 0;
+        CUDA_CHECK_SDF(cudaMemcpy(&total_bin_triangles, d_bin_offsets + num_bins, sizeof(int), cudaMemcpyDeviceToHost));
+
+        if (total_bin_triangles > 0) {
+            CUDA_CHECK_SDF(cudaMalloc(&d_bin_triangles, total_bin_triangles * sizeof(int)));
+            populate_bins_kernel<<<blocks_f, threads>>>(d_vertices, d_faces, num_faces, gx, gy, gz, ox, oy, oz, bdx, bdy, bdz, margin, d_bin_offsets, d_bin_write_counts, d_bin_triangles);
             CUDA_CHECK_SDF(cudaGetLastError());
-            CUDA_CHECK_SDF(cudaMemcpy(&h_changed, d_changed, sizeof(int), cudaMemcpyDeviceToHost));
-            if (h_changed == 0) break;
         }
 
-        int max_roots = 10000;
-        int* d_root_list = nullptr;
-        int* d_root_count = nullptr;
-        int* d_root_counts = nullptr;
-        CUDA_CHECK_SDF(cudaMalloc(&d_root_list, max_roots * sizeof(int)));
-        CUDA_CHECK_SDF(cudaMalloc(&d_root_count, sizeof(int)));
-        CUDA_CHECK_SDF(cudaMemset(d_root_count, 0, sizeof(int)));
-
-        find_component_roots_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, d_root_list, d_root_count, max_roots);
+        uint8_t* d_bin_active = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_bin_active, num_bins * sizeof(uint8_t)));
+        int blocks_bins = (num_bins + threads - 1) / threads;
+        mark_active_bins_kernel<<<blocks_bins, threads>>>(gx, gy, gz, d_bin_offsets, d_bin_active);
         CUDA_CHECK_SDF(cudaGetLastError());
 
-        int num_roots = 0;
-        CUDA_CHECK_SDF(cudaMemcpy(&num_roots, d_root_count, sizeof(int), cudaMemcpyDeviceToHost));
-        num_roots = min(num_roots, max_roots);
-
-        if (num_roots > 0) {
-            CUDA_CHECK_SDF(cudaMalloc(&d_root_counts, num_roots * sizeof(int)));
-            CUDA_CHECK_SDF(cudaMemset(d_root_counts, 0, num_roots * sizeof(int)));
-            count_root_sizes_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, d_root_list, num_roots, d_root_counts);
-            CUDA_CHECK_SDF(cudaGetLastError());
-
-            std::vector<int> h_root_list(num_roots);
-            std::vector<int> h_root_counts(num_roots);
-            CUDA_CHECK_SDF(cudaMemcpy(h_root_list.data(), d_root_list, num_roots * sizeof(int), cudaMemcpyDeviceToHost));
-            CUDA_CHECK_SDF(cudaMemcpy(h_root_counts.data(), d_root_counts, num_roots * sizeof(int), cudaMemcpyDeviceToHost));
-
-            int max_count = 0;
-            int max_label = -1;
-            for (int i = 0; i < num_roots; ++i) {
-                if (h_root_counts[i] > max_count) {
-                    max_count = h_root_counts[i];
-                    max_label = h_root_list[i];
-                }
-            }
-
-            if (max_label >= 0) {
-                keep_max_label_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, max_label);
-                CUDA_CHECK_SDF(cudaGetLastError());
-            }
-            CUDA_CHECK_SDF(cudaFree(d_root_counts));
-        }
-        CUDA_CHECK_SDF(cudaFree(d_root_count));
-        CUDA_CHECK_SDF(cudaFree(d_root_list));
-        CUDA_CHECK_SDF(cudaFree(d_labels));
-        d_labels = nullptr;
-
-        evaluate_sdf_from_solid_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, vres, vox_vx, vox_vy, vox_vz, d_voxels, d_values);
+        evaluate_sdf_grid_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, gx, gy, gz, bdx, bdy, bdz, d_bin_offsets, d_bin_triangles, d_vertices, d_faces, d_bin_active, d_values);
         CUDA_CHECK_SDF(cudaGetLastError());
-        CUDA_CHECK_SDF(cudaDeviceSynchronize());
 
-        float* d_values_temp = nullptr;
-        CUDA_CHECK_SDF(cudaMalloc(&d_values_temp, (size_t)total_voxels * sizeof(float)));
-        for (int iter = 0; iter < 12; ++iter) {
-            eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values, d_values_temp);
-            eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values_temp, d_values);
-        }
-        CUDA_CHECK_SDF(cudaFree(d_values_temp));
+        apply_solid_voxel_sign_mask_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, vres, vox_vx, vox_vy, vox_vz, d_voxels, d_values);
+        CUDA_CHECK_SDF(cudaGetLastError());
 
+        if (d_bin_triangles) CUDA_CHECK_SDF(cudaFree(d_bin_triangles));
+        CUDA_CHECK_SDF(cudaFree(d_bin_active));
+        CUDA_CHECK_SDF(cudaFree(d_bin_counts));
+        CUDA_CHECK_SDF(cudaFree(d_bin_offsets));
+        CUDA_CHECK_SDF(cudaFree(d_bin_write_counts));
         CUDA_CHECK_SDF(cudaFree(d_changed));
         CUDA_CHECK_SDF(cudaFree(d_voxels));
     } else {
