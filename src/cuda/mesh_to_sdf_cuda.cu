@@ -252,7 +252,7 @@ __global__ void evaluate_sdf_grid_kernel(
 
     int bin_idx_center = center_bx + gx * (center_by + gy * center_bz);
     if (d_bin_active != nullptr && d_bin_active[bin_idx_center] == 0) {
-        d_values[idx] = 10.0f;
+        d_values[idx] = 3.402823466e+38f;
         return;
     }
 
@@ -287,19 +287,47 @@ __global__ void evaluate_sdf_grid_kernel(
                         float3 closest;
                         float d_sq = point_to_triangle_distance_sq(p, v0, v1, v2, closest);
                         float3 n = cross(v1 - v0, v2 - v0);
-                        float n_len = sqrtf(dot(n, n));
-                        if (n_len > 1e-12f) {
-                            n = make_float3(n.x / n_len, n.y / n_len, n.z / n_len);
+                        float area_2 = sqrtf(dot(n, n));
+                        if (area_2 > 1e-12f) {
+                            n = make_float3(n.x / area_2, n.y / area_2, n.z / area_2);
                         } else {
                             continue;
                         }
 
-                        if (d_sq < min_dist_sq - 1e-6f * (min_dist_sq + 1e-8f)) {
+                        float w = area_2;
+                        float d_v0_sq = dot(closest - v0, closest - v0);
+                        float d_v1_sq = dot(closest - v1, closest - v1);
+                        float d_v2_sq = dot(closest - v2, closest - v2);
+                        float v_eps_sq = 1e-6f * min_box_dim * min_box_dim;
+                        if (d_v0_sq < v_eps_sq) {
+                            float3 e1 = v1 - v0, e2 = v2 - v0;
+                            float l1 = sqrtf(dot(e1, e1)), l2 = sqrtf(dot(e2, e2));
+                            if (l1 > 1e-6f && l2 > 1e-6f) {
+                                float c_th = fmaxf(-1.0f, fminf(1.0f, dot(e1, e2) / (l1 * l2)));
+                                w = acosf(c_th);
+                            }
+                        } else if (d_v1_sq < v_eps_sq) {
+                            float3 e1 = v0 - v1, e2 = v2 - v1;
+                            float l1 = sqrtf(dot(e1, e1)), l2 = sqrtf(dot(e2, e2));
+                            if (l1 > 1e-6f && l2 > 1e-6f) {
+                                float c_th = fmaxf(-1.0f, fminf(1.0f, dot(e1, e2) / (l1 * l2)));
+                                w = acosf(c_th);
+                            }
+                        } else if (d_v2_sq < v_eps_sq) {
+                            float3 e1 = v0 - v2, e2 = v1 - v2;
+                            float l1 = sqrtf(dot(e1, e1)), l2 = sqrtf(dot(e2, e2));
+                            if (l1 > 1e-6f && l2 > 1e-6f) {
+                                float c_th = fmaxf(-1.0f, fminf(1.0f, dot(e1, e2) / (l1 * l2)));
+                                w = acosf(c_th);
+                            }
+                        }
+
+                        if (d_sq < min_dist_sq - 1e-5f * (min_dist_sq + 1e-8f)) {
                             min_dist_sq = d_sq;
                             best_closest = closest;
-                            best_normal = n;
-                        } else if (fabsf(d_sq - min_dist_sq) <= 1e-6f * (min_dist_sq + 1e-8f)) {
-                            best_normal = make_float3(best_normal.x + n.x, best_normal.y + n.y, best_normal.z + n.z);
+                            best_normal = make_float3(w * n.x, w * n.y, w * n.z);
+                        } else if (fabsf(d_sq - min_dist_sq) <= 1e-5f * (min_dist_sq + 1e-8f)) {
+                            best_normal = make_float3(best_normal.x + w * n.x, best_normal.y + w * n.y, best_normal.z + w * n.z);
                         }
                     }
                 }
@@ -312,7 +340,7 @@ __global__ void evaluate_sdf_grid_kernel(
     }
 
     if (min_dist_sq == 3.402823466e+38f) {
-        d_values[idx] = 10.0f;
+        d_values[idx] = 3.402823466e+38f;
     } else {
         float dist = sqrtf(min_dist_sq);
         float norm_len = sqrtf(dot(best_normal, best_normal));
@@ -323,13 +351,108 @@ __global__ void evaluate_sdf_grid_kernel(
         if (best_dot < 0.0f) {
             dist = -dist;
         }
-        if (dist > 3.0f * min_box_dim) {
-            dist = 10.0f;
-        } else if (dist < -3.0f * min_box_dim) {
-            dist = -10.0f;
+        if (dist > 2.5f * min_box_dim || dist < -2.5f * min_box_dim) {
+            d_values[idx] = 3.402823466e+38f;
+        } else {
+            d_values[idx] = dist;
         }
-        d_values[idx] = dist;
     }
+}
+
+__global__ void init_exterior_border_kernel(int nx, int ny, int nz, float* d_values, uint8_t* d_exterior_mask) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_voxels = nx * ny * nz;
+    if (idx >= total_voxels) return;
+
+    int ix = idx % nx;
+    int iy = (idx / nx) % ny;
+    int iz = idx / (nx * ny);
+
+    if (ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1 || iz == 0 || iz == nz - 1) {
+        if (d_values[idx] == 3.402823466e+38f || d_values[idx] > 0.0f) {
+            if (d_values[idx] == 3.402823466e+38f) d_values[idx] = 10.0f;
+            d_exterior_mask[idx] = 1;
+        } else {
+            d_exterior_mask[idx] = 0;
+        }
+    } else {
+        if (d_values[idx] != 3.402823466e+38f && d_values[idx] > 0.0f) {
+            d_exterior_mask[idx] = 1;
+        } else {
+            d_exterior_mask[idx] = 0;
+        }
+    }
+}
+
+__global__ void propagate_exterior_signs_kernel(int nx, int ny, int nz, float* d_values, uint8_t* d_exterior_mask, int* d_changed) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_voxels = nx * ny * nz;
+    if (idx >= total_voxels) return;
+
+    if (d_exterior_mask[idx] == 1) return;
+    if (d_values[idx] != 3.402823466e+38f && d_values[idx] <= 0.0f) return;
+
+    int ix = idx % nx;
+    int iy = (idx / nx) % ny;
+    int iz = idx / (nx * ny);
+
+    bool neighbor_exterior = false;
+    if (ix > 0 && d_exterior_mask[idx - 1] == 1) neighbor_exterior = true;
+    else if (ix < nx - 1 && d_exterior_mask[idx + 1] == 1) neighbor_exterior = true;
+    else if (iy > 0 && d_exterior_mask[idx - nx] == 1) neighbor_exterior = true;
+    else if (iy < ny - 1 && d_exterior_mask[idx + nx] == 1) neighbor_exterior = true;
+    else if (iz > 0 && d_exterior_mask[idx - nx * ny] == 1) neighbor_exterior = true;
+    else if (iz < nz - 1 && d_exterior_mask[idx + nx * ny] == 1) neighbor_exterior = true;
+
+    if (neighbor_exterior) {
+        if (d_values[idx] == 3.402823466e+38f) {
+            d_values[idx] = 10.0f;
+        }
+        d_exterior_mask[idx] = 1;
+        *d_changed = 1;
+    }
+}
+
+__global__ void resolve_interior_cavities_kernel(int nx, int ny, int nz, float* d_values, const uint8_t* d_exterior_mask) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_voxels = nx * ny * nz;
+    if (idx >= total_voxels) return;
+
+    if (d_values[idx] == 3.402823466e+38f) {
+        if (d_exterior_mask[idx] == 0) {
+            d_values[idx] = -10.0f;
+        } else {
+            d_values[idx] = 10.0f;
+        }
+    }
+}
+
+__global__ void eikonal_relaxation_kernel(int nx, int ny, int nz, float vx, float vy, float vz, const float* d_values_in, float* d_values_out) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_voxels = nx * ny * nz;
+    if (idx >= total_voxels) return;
+
+    int ix = idx % nx;
+    int iy = (idx / nx) % ny;
+    int iz = idx / (nx * ny);
+
+    float val = d_values_in[idx];
+    if (fabsf(val) <= fminf(vx, fminf(vy, vz)) * 1.5f) {
+        d_values_out[idx] = val;
+        return;
+    }
+
+    float abs_val = fabsf(val);
+    float sign_val = (val < 0.0f) ? -1.0f : 1.0f;
+
+    if (ix > 0) abs_val = fminf(abs_val, fabsf(d_values_in[idx - 1]) + vx);
+    if (ix < nx - 1) abs_val = fminf(abs_val, fabsf(d_values_in[idx + 1]) + vx);
+    if (iy > 0) abs_val = fminf(abs_val, fabsf(d_values_in[idx - nx]) + vy);
+    if (iy < ny - 1) abs_val = fminf(abs_val, fabsf(d_values_in[idx + nx]) + vy);
+    if (iz > 0) abs_val = fminf(abs_val, fabsf(d_values_in[idx - nx * ny]) + vz);
+    if (iz < nz - 1) abs_val = fminf(abs_val, fabsf(d_values_in[idx + nx * ny]) + vz);
+
+    d_values_out[idx] = sign_val * abs_val;
 }
 
 DenseSdfGridDevice compute_mesh_sdf_device_cuda(
@@ -400,6 +523,41 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
     int blocks_v = (total_voxels + threads - 1) / threads;
     evaluate_sdf_grid_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, gx, gy, gz, bdx, bdy, bdz, d_bin_offsets, d_bin_triangles, d_vertices, d_faces, d_bin_active, d_values);
     CUDA_CHECK_SDF(cudaGetLastError());
+
+    uint8_t* d_exterior_mask = nullptr;
+    int* d_changed = nullptr;
+    CUDA_CHECK_SDF(cudaMalloc(&d_exterior_mask, total_voxels * sizeof(uint8_t)));
+    CUDA_CHECK_SDF(cudaMalloc(&d_changed, sizeof(int)));
+
+    init_exterior_border_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask);
+    CUDA_CHECK_SDF(cudaGetLastError());
+
+    for (int iter = 0; iter < 40; ++iter) {
+        int h_changed = 0;
+        CUDA_CHECK_SDF(cudaMemcpy(d_changed, &h_changed, sizeof(int), cudaMemcpyHostToDevice));
+        propagate_exterior_signs_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask, d_changed);
+        CUDA_CHECK_SDF(cudaGetLastError());
+        CUDA_CHECK_SDF(cudaMemcpy(&h_changed, d_changed, sizeof(int), cudaMemcpyDeviceToHost));
+        if (h_changed == 0) break;
+    }
+
+    resolve_interior_cavities_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask);
+    CUDA_CHECK_SDF(cudaGetLastError());
+
+    float* d_values_tmp = nullptr;
+    CUDA_CHECK_SDF(cudaMalloc(&d_values_tmp, total_voxels * sizeof(float)));
+    for (int iter = 0; iter < 4; ++iter) {
+        if (iter % 2 == 0) {
+            eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values, d_values_tmp);
+        } else {
+            eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values_tmp, d_values);
+        }
+        CUDA_CHECK_SDF(cudaGetLastError());
+    }
+
+    CUDA_CHECK_SDF(cudaFree(d_values_tmp));
+    CUDA_CHECK_SDF(cudaFree(d_changed));
+    CUDA_CHECK_SDF(cudaFree(d_exterior_mask));
     CUDA_CHECK_SDF(cudaDeviceSynchronize());
 
     CUDA_CHECK_SDF(cudaFree(d_bin_active));
