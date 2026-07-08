@@ -2,10 +2,12 @@
 #include "contouring.h"
 #include "vertex_refinement.h"
 #include <iostream>
+#ifdef DC_ENABLE_VIEWER
 #include <polyscope/polyscope.h>
 #include <polyscope/surface_mesh.h>
 #include <polyscope/point_cloud.h>
 #include <polyscope/curve_network.h>
+#endif
 #include <unordered_map>
 #include <cstdlib>
 #include <string>
@@ -605,7 +607,7 @@ void update_hermite_points_and_normals(
             }
 
             // visualize using polyscope
-            #ifndef NDEBUG
+            #if defined(DC_ENABLE_VIEWER) && !defined(NDEBUG)
             {
                 polyscope::init();
                 polyscope::registerSurfaceMesh("edge_processing_temp_mesh", V_global, F_global);

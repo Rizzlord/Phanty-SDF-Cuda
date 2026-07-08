@@ -1,11 +1,25 @@
 #include "Cell.h"
 #include <iostream>
 #include <Eigen/Dense>
+#ifdef DC_ENABLE_VIEWER
 #include <polyscope/polyscope.h>
 #include <polyscope/point_cloud.h>
 #include <polyscope/curve_network.h>
 #include <polyscope/surface_mesh.h>
+#endif
 #include <array>
+#include <vector>
+
+std::vector<Cell>* globalCellsPtr = nullptr;
+std::vector<Cell>* getGeneratedCells() {
+    return globalCellsPtr;
+}
+void clearGeneratedCells() {
+    if (globalCellsPtr) {
+        delete globalCellsPtr;
+        globalCellsPtr = nullptr;
+    }
+}
 
 
 
@@ -596,6 +610,7 @@ void Cell::clean() {
 
 
 
+#ifdef DC_ENABLE_VIEWER
 #include <glm/glm.hpp>
 
 void Cell::visualize() const {
@@ -806,47 +821,50 @@ void Cell::visualize() const {
     //         Eigen::MatrixXd matNodes(segmentNodes.size(), 3);
     //         Eigen::MatrixXi matEdges(connectionEdges.size(), 2);
             
-    //         for(size_t i=0; i<segmentNodes.size(); ++i) matNodes.row(i) = segmentNodes[i].transpose();
-    //         for(size_t i=0; i<connectionEdges.size(); ++i) {
-    //             matEdges(i, 0) = connectionEdges[i][0];
-    //             matEdges(i, 1) = connectionEdges[i][1];
-    //         }
-
-    //         auto* cn_conn = polyscope::registerCurveNetwork(prefix + "Sphere-Spoke Connections", matNodes, matEdges);
-    //         cn_conn->setColor(glm::vec3(0.8, 0.8, 0.8));
-    //         cn_conn->setRadius(0.002);
+    //     std::vector<Eigen::Vector3d> nodes;
+    //     std::vector<Eigen::Vector2i> E;
+    //     nodes.reserve(closest_points_info.size() * 2);
+    //     E.reserve(closest_points_info.size());
+    //     for (size_t i = 0; i < closest_points_info.size(); ++i) {
+    //         const auto& info = closest_points_info[i];
+    //         nodes.push_back(info.q);
+    //         nodes.push_back(info.p);
+    //         E.push_back(Eigen::Vector2i(2 * i, 2 * i + 1));
     //     }
+    //     Eigen::MatrixXd matNodes(nodes.size(), 3);
+    //     for (size_t i = 0; i < nodes.size(); ++i) {
+    //         matNodes.row(i) = nodes[i].transpose();
+    //     }
+    //     tryRemove("Sphere-Spoke Connections");
+    //     auto* cn_conn = polyscope::registerCurveNetwork(prefix + "Sphere-Spoke Connections", matNodes, matEdges);
+    //     cn_conn->setColor(glm::vec3(0.8, 0.0, 0.0)); // RED
+    //     cn_conn->setRadius(0.002);
     // }
 
     // -----------------------------------
-    // 9. Face Intersections (brown)
+    // 8. Face Intersections
     // -----------------------------------
     if (!face_intersections.empty()) {
-        std::vector<Eigen::Vector3d> pointsInter;
-        pointsInter.reserve(face_intersections.size());
-        for (const auto& fi : face_intersections) {
-            pointsInter.push_back(fi.second);
-        }
-        Eigen::MatrixXd matInter(pointsInter.size(), 3);
-        for (size_t i = 0; i < pointsInter.size(); ++i) {
-            matInter.row(i) = pointsInter[i].transpose();
+        Eigen::MatrixXd matInter(face_intersections.size(), 3);
+        int i = 0;
+        for (const auto& kv : face_intersections) {
+            matInter.row(i) = kv.second.transpose();
+            i++;
         }
         tryRemove("Face Intersections");
         auto* pc_inter = polyscope::registerPointCloud(prefix + "Face Intersections", matInter);
-        pc_inter->setPointColor(glm::vec3(0.5, 0.3, 0.2)); // Brown
-        pc_inter->setPointRadius(0.025);
-    }    
-
+        pc_inter->setPointColor(glm::vec3(1.0, 1.0, 0.0)); // Yellow
+        pc_inter->setPointRadius(0.015);
+    }
 
     // -----------------------------------
-    // 10. Cell Triangulation (if computed)
+    // 10. Local mesh (if any)
     // -----------------------------------
     if (!local_mesh_vertices.empty() && !local_mesh_faces.empty()) {
         Eigen::MatrixXd V_mesh(local_mesh_vertices.size(), 3);
         for (size_t i = 0; i < local_mesh_vertices.size(); ++i) {
             V_mesh.row(i) = local_mesh_vertices[i].transpose();
         }
-
         Eigen::MatrixXi F_mesh(local_mesh_faces.size(), 3);
         for (size_t i = 0; i < local_mesh_faces.size(); ++i) {
             F_mesh.row(i) = local_mesh_faces[i];
@@ -864,10 +882,6 @@ void Cell::visualize() const {
     // -----------------------------------
     // 11. Closest points info 
     // -----------------------------------
-    // Plot the t points stored in closest_points_info
-    // Reconstruct the t using the stored barycentric coordinates (magenta)
-    // Also plot the corresponding q points (cyan)
-    
     if (!closest_points_info.empty()) {
         std::vector<Eigen::Vector3d> pointsQ;
         std::vector<Eigen::Vector3d> pointsT;
@@ -901,7 +915,7 @@ void Cell::visualize() const {
         pc_t->setPointColor(glm::vec3(1.0, 0.0, 1.0)); // Magenta
         pc_t->setPointRadius(0.012);
     }
-
-
-    // No blocking show() here — we register structures into the existing Polyscope context and return.
 }
+#else
+void Cell::visualize() const {}
+#endif

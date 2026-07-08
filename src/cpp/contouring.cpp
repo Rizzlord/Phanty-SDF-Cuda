@@ -3,18 +3,23 @@
 #include "vertex_refinement.h"
 #include "ui.h"
 #include <vector>
+#include <random>
 #include <cassert>
 #include <igl/marching_cubes.h>
 #include <iostream>
+#ifdef DC_ENABLE_VIEWER
 #include <polyscope/polyscope.h>
 #include <polyscope/point_cloud.h>
 #include <glm/glm.hpp>
+#endif
 #include <igl/point_mesh_squared_distance.h>
 #include <igl/AABB.h>
 #include <Eigen/Core>
 #include "hermite_update.h"
 
+#ifdef DC_ENABLE_VIEWER
 #include <polyscope/surface_mesh.h>
+#endif
 
 
 int currentCell = 0;
@@ -1329,6 +1334,7 @@ void contouring(
         // optimize_triangulation(S, GV, V, copyF, F, resX, resY, resZ);
         // triangulate_based_on_hermite_normal(V, copyF, F, hermite_normals_per_quad);
 
+#ifdef DC_ENABLE_VIEWER
         // Collect all Hermite points and normals across cells, then register once
         std::vector<Eigen::Vector3d> allHermitePos;
         std::vector<Eigen::Vector3d> allHermiteNrm;
@@ -1383,6 +1389,7 @@ void contouring(
         } catch(...) {
             // ignore Polyscope errors (e.g., run without UI)
         }
+#endif
 
     }
 }

@@ -14,22 +14,7 @@
 
 
 
-// global pointer to generated cells (owned by this translation unit)
-std::vector<Cell>* globalCellsPtr = nullptr;
-
-// Return pointer to generated cells (or nullptr)
-std::vector<Cell>* getGeneratedCells() {
-    return globalCellsPtr;
-}
-
 int outer_iteration_counter = 0;
-
-void clearGeneratedCells() {
-    if (globalCellsPtr) {
-        delete globalCellsPtr;
-        globalCellsPtr = nullptr;
-    }
-}
 
 
 void step_cell_inner_iteration(Cell& cell, const ContouringOptions& options) {

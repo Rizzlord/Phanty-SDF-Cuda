@@ -2,10 +2,16 @@
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
 #include <pybind11/eigen.h>
+#include <pybind11/numpy.h>
 
 #include "contouring.h"
 #include "sdf.h"
 #include <igl/grid.h>
+#include "dc_backend.h"
+#ifdef DC_ENABLE_CUDA
+#include "dc_cuda.h"
+#include "mesh_to_sdf.h"
+#endif
 
 namespace py = pybind11;
 
@@ -117,4 +123,131 @@ PYBIND11_MODULE(_contouring_cpp_module, m) {
 
     m.def("_contouring_cpp_with_sdf", &py_contouring_with_sdf, "Internal: run contouring with true sdf and grad",
 	    py::arg("S"), py::arg("GV"), py::arg("resX"), py::arg("resY"), py::arg("resZ"), py::arg("isoValue"), py::arg("options"), py::arg("true_sdf"), py::arg("true_sdf_grad"));
+
+    py::class_<DenseSdfGrid>(m, "DenseSdfGrid")
+        .def(py::init<>())
+        .def_readwrite("nx", &DenseSdfGrid::nx)
+        .def_readwrite("ny", &DenseSdfGrid::ny)
+        .def_readwrite("nz", &DenseSdfGrid::nz)
+        .def_readwrite("vx", &DenseSdfGrid::vx)
+        .def_readwrite("vy", &DenseSdfGrid::vy)
+        .def_readwrite("vz", &DenseSdfGrid::vz)
+        .def_readwrite("ox", &DenseSdfGrid::ox)
+        .def_readwrite("oy", &DenseSdfGrid::oy)
+        .def_readwrite("oz", &DenseSdfGrid::oz)
+        .def_readwrite("values", &DenseSdfGrid::values);
+
+    py::class_<DualContouringMesh>(m, "DualContouringMesh")
+        .def(py::init<>())
+        .def_readwrite("vertices", &DualContouringMesh::vertices)
+        .def_readwrite("faces", &DualContouringMesh::faces);
+
+    py::class_<DualContouringStats>(m, "DualContouringStats")
+        .def(py::init<>())
+        .def_readwrite("backend", &DualContouringStats::backend)
+        .def_readwrite("nx", &DualContouringStats::nx)
+        .def_readwrite("ny", &DualContouringStats::ny)
+        .def_readwrite("nz", &DualContouringStats::nz)
+        .def_readwrite("total_cells", &DualContouringStats::total_cells)
+        .def_readwrite("active_cells", &DualContouringStats::active_cells)
+        .def_readwrite("total_bricks", &DualContouringStats::total_bricks)
+        .def_readwrite("active_bricks", &DualContouringStats::active_bricks)
+        .def_readwrite("upload_ms", &DualContouringStats::upload_ms)
+        .def_readwrite("marking_ms", &DualContouringStats::marking_ms)
+        .def_readwrite("compaction_ms", &DualContouringStats::compaction_ms)
+        .def_readwrite("active_brick_marking_ms", &DualContouringStats::active_brick_marking_ms)
+        .def_readwrite("active_brick_compaction_ms", &DualContouringStats::active_brick_compaction_ms)
+        .def_readwrite("active_cell_marking_ms", &DualContouringStats::active_cell_marking_ms)
+        .def_readwrite("active_cell_compaction_ms", &DualContouringStats::active_cell_compaction_ms)
+        .def_readwrite("qef_ms", &DualContouringStats::qef_ms)
+        .def_readwrite("face_emission_ms", &DualContouringStats::face_emission_ms)
+        .def_readwrite("face_count_ms", &DualContouringStats::face_count_ms)
+        .def_readwrite("face_prefix_sum_ms", &DualContouringStats::face_prefix_sum_ms)
+        .def_readwrite("face_fill_ms", &DualContouringStats::face_fill_ms)
+        .def_readwrite("download_ms", &DualContouringStats::download_ms)
+        .def_readwrite("total_ms", &DualContouringStats::total_ms)
+        .def_readwrite("vertex_count", &DualContouringStats::vertex_count)
+        .def_readwrite("face_count", &DualContouringStats::face_count)
+        .def_readwrite("qef_fallback_count", &DualContouringStats::qef_fallback_count)
+        .def_readwrite("clamp_count", &DualContouringStats::clamp_count)
+        .def_readwrite("invalid_count", &DualContouringStats::invalid_count);
+
+    py::class_<CpuDualContouringBackend>(m, "CpuDualContouringBackend")
+        .def(py::init<>())
+        .def("extract", [](CpuDualContouringBackend& self, const DenseSdfGrid& grid) {
+            DualContouringStats stats;
+            DualContouringMesh mesh = self.extract(grid, stats);
+            return py::make_tuple(mesh, stats);
+        });
+
+#ifdef DC_ENABLE_CUDA
+    py::class_<DenseSdfGridDevice>(m, "DenseSdfGridDevice")
+        .def(py::init<>())
+        .def_readwrite("nx", &DenseSdfGridDevice::nx)
+        .def_readwrite("ny", &DenseSdfGridDevice::ny)
+        .def_readwrite("nz", &DenseSdfGridDevice::nz)
+        .def_readwrite("vx", &DenseSdfGridDevice::vx)
+        .def_readwrite("vy", &DenseSdfGridDevice::vy)
+        .def_readwrite("vz", &DenseSdfGridDevice::vz)
+        .def_readwrite("ox", &DenseSdfGridDevice::ox)
+        .def_readwrite("oy", &DenseSdfGridDevice::oy)
+        .def_readwrite("oz", &DenseSdfGridDevice::oz)
+        .def("free", [](DenseSdfGridDevice& self) {
+            free_mesh_sdf_device_cuda(self);
+        });
+
+    py::enum_<NormalComputationMode>(m, "NormalComputationMode")
+        .value("FiniteDifference", NormalComputationMode::FiniteDifference)
+        .value("EdgeGradient", NormalComputationMode::EdgeGradient)
+        .value("PrecomputedGradient", NormalComputationMode::PrecomputedGradient)
+        .export_values();
+
+    py::class_<CudaDualContouringBackend>(m, "CudaDualContouringBackend")
+        .def(py::init<>())
+        .def("extract", [](CudaDualContouringBackend& self, const DenseSdfGrid& grid) {
+            DualContouringStats stats;
+            DualContouringMesh mesh = self.extract(grid, stats);
+            return py::make_tuple(mesh, stats);
+        })
+        .def("extract_device", [](CudaDualContouringBackend& self, const DenseSdfGridDevice& grid) {
+            DualContouringStats stats;
+            DualContouringMesh mesh = self.extract_device(grid, stats);
+            return py::make_tuple(mesh, stats);
+        });
+
+    py::class_<CudaSparseDualContouringBackend>(m, "CudaSparseDualContouringBackend")
+        .def(py::init<int, NormalComputationMode, int>(),
+            py::arg("brick_size") = 8,
+            py::arg("normal_mode") = NormalComputationMode::FiniteDifference,
+            py::arg("chunk_size") = 0)
+        .def_readwrite("brick_size", &CudaSparseDualContouringBackend::brick_size)
+        .def_readwrite("normal_mode", &CudaSparseDualContouringBackend::normal_mode)
+        .def_readwrite("chunk_size", &CudaSparseDualContouringBackend::chunk_size)
+        .def("extract", [](CudaSparseDualContouringBackend& self, const DenseSdfGrid& grid) {
+            DualContouringStats stats;
+            DualContouringMesh mesh = self.extract(grid, stats);
+            return py::make_tuple(mesh, stats);
+        })
+        .def("extract_device", [](CudaSparseDualContouringBackend& self, const DenseSdfGridDevice& grid) {
+            DualContouringStats stats;
+            DualContouringMesh mesh = self.extract_device(grid, stats);
+            return py::make_tuple(mesh, stats);
+        });
+
+    m.def("mesh_to_sdf_cuda", [](py::array_t<float> vertices, py::array_t<int> faces, int nx, int ny, int nz, float ox, float oy, float oz, float vx, float vy, float vz) {
+        py::buffer_info v_info = vertices.request();
+        py::buffer_info f_info = faces.request();
+        float ms = 0.0f;
+        DenseSdfGrid grid = compute_mesh_sdf_cuda((const float*)v_info.ptr, v_info.shape[0], (const int*)f_info.ptr, f_info.shape[0], nx, ny, nz, ox, oy, oz, vx, vy, vz, &ms);
+        return py::make_tuple(grid, ms);
+    });
+
+    m.def("mesh_to_sdf_device_cuda", [](py::array_t<float> vertices, py::array_t<int> faces, int nx, int ny, int nz, float ox, float oy, float oz, float vx, float vy, float vz) {
+        py::buffer_info v_info = vertices.request();
+        py::buffer_info f_info = faces.request();
+        float ms = 0.0f;
+        DenseSdfGridDevice dev_grid = compute_mesh_sdf_device_cuda((const float*)v_info.ptr, v_info.shape[0], (const int*)f_info.ptr, f_info.shape[0], nx, ny, nz, ox, oy, oz, vx, vy, vz, &ms);
+        return py::make_tuple(dev_grid, ms);
+    });
+#endif
 }

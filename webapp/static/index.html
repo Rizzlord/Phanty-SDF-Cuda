@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Antigravity SDF Dual Contouring Studio</title>
+    <meta name="description" content="Ultra-fast GPU-accelerated 3D surface extraction from signed distance fields using CUDA and Dual Contouring.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+</head>
+<body>
+    <div class="bg-gradient-mesh"></div>
+    <header class="navbar">
+        <div class="brand">
+            <div class="logo-icon">⚡</div>
+            <div>
+                <h1>Antigravity Dual Contouring</h1>
+                <p class="subtitle">SIGGRAPH 2026 High-Performance GPU Mesh Extraction</p>
+            </div>
+        </div>
+        <div class="status-badge">
+            <span class="pulse-dot"></span>
+            <span>CUDA 12.8 Backend Active</span>
+        </div>
+    </header>
+
+    <main class="studio-grid">
+        <section class="control-panel glass-card">
+            <h2 class="panel-title">1. Input 3D Model</h2>
+            
+            <div id="drop-zone" class="drop-zone">
+                <div class="drop-content">
+                    <div class="upload-icon">📦</div>
+                    <p class="drop-main-text">Drag & Drop .GLB File Here</p>
+                    <p class="drop-sub-text">or click to browse local files</p>
+                    <input type="file" id="file-input" accept=".glb" hidden>
+                </div>
+                <div id="file-info" class="file-info hidden">
+                    <span id="file-name" class="file-name-text">filename.glb</span>
+                    <span id="file-size" class="file-size-badge">0 MB</span>
+                </div>
+            </div>
+
+            <button id="load-default-btn" class="secondary-btn">
+                <span>Try Sample (test_input.glb ~60MB)</span>
+            </button>
+
+            <h2 class="panel-title mt-6">2. Contouring Settings</h2>
+            
+            <div class="setting-group">
+                <label for="res-slider" class="setting-label">
+                    <span>SDF Grid Resolution</span>
+                    <span id="res-val" class="setting-value">64³ Grid</span>
+                </label>
+                <input type="range" id="res-slider" min="32" max="2048" step="16" value="64" class="custom-slider">
+                <div class="slider-marks">
+                    <span>32³ (Fast)</span>
+                    <span>512³ (HD Detail)</span>
+                    <span>2048³ (Ultra Extreme)</span>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <label class="setting-label">Execution Backend</label>
+                <div class="backend-toggle">
+                    <input type="radio" id="backend-cuda-sparse" name="backend" value="cuda-sparse" checked>
+                    <label for="backend-cuda-sparse" class="toggle-option">⚡ CUDA Sparse (Tiled)</label>
+
+                    <input type="radio" id="backend-cuda" name="backend" value="cuda">
+                    <label for="backend-cuda" class="toggle-option">⚡ CUDA Dense</label>
+
+                    <input type="radio" id="backend-cpu" name="backend" value="cpu">
+                    <label for="backend-cpu" class="toggle-option">💻 CPU Headless</label>
+                </div>
+            </div>
+
+            <div class="setting-group" id="brick-size-group">
+                <label class="setting-label">Sparse Brick Dimensions (K³)</label>
+                <div class="backend-toggle">
+                    <input type="radio" id="brick-8" name="brick_size" value="8" checked>
+                    <label for="brick-8" class="toggle-option">8³ Bricks (Default)</label>
+
+                    <input type="radio" id="brick-16" name="brick_size" value="16">
+                    <label for="brick-16" class="toggle-option">16³ Bricks</label>
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <label for="scale-slider" class="setting-label">
+                    <span>Bounding Box Scale Padding</span>
+                    <span id="scale-val" class="setting-value">0.85x</span>
+                </label>
+                <input type="range" id="scale-slider" min="0.60" max="0.95" step="0.05" value="0.85" class="custom-slider">
+            </div>
+
+            <div class="action-buttons">
+                <button id="start-btn" class="glow-btn primary-btn" disabled>
+                    <span class="btn-text">Extract Dual Contouring Mesh</span>
+                    <div id="spinner" class="spinner hidden"></div>
+                </button>
+
+                <button id="download-btn" class="glow-btn download-btn hidden" disabled>
+                    <span>⬇ Download Output .GLB</span>
+                </button>
+            </div>
+        </section>
+
+        <section class="viewport-section glass-card">
+            <div class="viewport-header">
+                <div class="tabs">
+                    <button id="tab-input" class="tab-btn active">Input Mesh</button>
+                    <button id="tab-output" class="tab-btn" disabled>Extracted Dual Contouring Output</button>
+                </div>
+                <div class="viewport-controls">
+                    <button id="reset-cam-btn" class="icon-btn" title="Reset Camera">🔄 Reset View</button>
+                    <button id="wireframe-btn" class="icon-btn" title="Toggle Wireframe">📐 Wireframe</button>
+                </div>
+            </div>
+
+            <div class="canvas-container">
+                <div id="loading-overlay" class="loading-overlay hidden">
+                    <div class="spinner large-spinner"></div>
+                    <p id="loading-text">Extracting exact Hermite vertices via CUDA...</p>
+                    <div class="progress-bar-bg">
+                        <div id="progress-bar-fill" class="progress-bar-fill"></div>
+                    </div>
+                </div>
+                <div id="canvas-3d" class="canvas-3d"></div>
+            </div>
+
+            <div id="stats-dashboard" class="stats-dashboard hidden">
+                <div class="stat-card accent-card">
+                    <span class="stat-label">Total Execution</span>
+                    <span id="stat-total-time" class="stat-value">0.00 ms</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Output Vertices</span>
+                    <span id="stat-vertices" class="stat-value">0</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Output Quads / Faces</span>
+                    <span id="stat-faces" class="stat-value">0</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">SDF Voxelization</span>
+                    <span id="stat-sdf-time" class="stat-value">0.00 ms</span>
+                </div>
+                <div class="stat-card" id="card-active-bricks">
+                    <span class="stat-label">Active Bricks Culled</span>
+                    <span id="stat-bricks" class="stat-value">0 / 0 (0%)</span>
+                </div>
+                <div class="stat-card breakdown-card">
+                    <span class="stat-label">CUDA Pipeline Breakdown</span>
+                    <div class="breakdown-grid">
+                        <div><span>Upload:</span> <strong id="stat-upload">0.0 ms</strong></div>
+                        <div><span>Marking:</span> <strong id="stat-marking">0.0 ms</strong></div>
+                        <div><span>Compaction:</span> <strong id="stat-compaction">0.0 ms</strong></div>
+                        <div><span>QEF Solve:</span> <strong id="stat-qef">0.0 ms</strong></div>
+                        <div><span>Face Emit:</span> <strong id="stat-emit">0.0 ms</strong></div>
+                        <div><span>Download:</span> <strong id="stat-download">0.0 ms</strong></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+    <script src="app.js"></script>
+</body>
+</html>
