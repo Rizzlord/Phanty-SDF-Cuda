@@ -204,11 +204,13 @@ int main(int argc, char** argv) {
         backend = std::make_unique<CudaDualContouringBackend>();
     } else if (backend_type == "cuda-sparse") {
         backend = std::make_unique<CudaSparseDualContouringBackend>(brick_size, n_mode, chunk_size);
+    } else if (backend_type == "cuda-sparse-mvdc" || backend_type == "mvdc") {
+        backend = std::make_unique<CudaSparseMvdcDualContouringBackend>(brick_size, n_mode, chunk_size);
     } else {
         backend = std::make_unique<CpuDualContouringBackend>();
     }
 #else
-    if (backend_type == "cuda" || backend_type == "cuda-dense" || backend_type == "cuda-sparse") {
+    if (backend_type == "cuda" || backend_type == "cuda-dense" || backend_type == "cuda-sparse" || backend_type == "cuda-sparse-mvdc" || backend_type == "mvdc") {
         std::cerr << "Warning: CUDA backend not compiled. Using CPU.\n";
     }
     backend = std::make_unique<CpuDualContouringBackend>();
@@ -245,6 +247,15 @@ int main(int argc, char** argv) {
         std::cout << "QEF Fallback Count: " << stats.qef_fallback_count << "\n";
         std::cout << "Out-of-Cell Clamps: " << stats.clamp_count << "\n";
         std::cout << "Invalid/NaN Count: " << stats.invalid_count << "\n";
+        if (stats.ambiguous_cells > 0 || stats.multi_vertex_cells > 0) {
+            std::cout << "Ambiguous Cells: " << stats.ambiguous_cells << "\n";
+            std::cout << "Multi-Vertex Cells: " << stats.multi_vertex_cells << "\n";
+            std::cout << "One-Vertex Cells: " << stats.one_vertex_cells << "\n";
+            std::cout << "Two-Vertex Cells: " << stats.two_vertex_cells << "\n";
+            std::cout << "Split Rejection Count: " << stats.split_rejection_count << "\n";
+            std::cout << "Bad QEF Count: " << stats.bad_qef_count << "\n";
+            std::cout << "Faces Skipped (Missing Cluster): " << stats.faces_skipped_due_to_missing_cluster << "\n";
+        }
     }
 
     return 0;

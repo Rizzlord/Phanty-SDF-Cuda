@@ -71,6 +71,9 @@
                     <input type="radio" id="backend-cuda-sparse" name="backend" value="cuda-sparse" checked>
                     <label for="backend-cuda-sparse" class="toggle-option">⚡ CUDA Sparse (Tiled)</label>
 
+                    <input type="radio" id="backend-cuda-sparse-mvdc" name="backend" value="cuda-sparse-mvdc">
+                    <label for="backend-cuda-sparse-mvdc" class="toggle-option">💎 CUDA Sparse MVDC (Topology Fix)</label>
+
                     <input type="radio" id="backend-cuda" name="backend" value="cuda">
                     <label for="backend-cuda" class="toggle-option">⚡ CUDA Dense</label>
 
@@ -153,6 +156,10 @@
                 <div class="stat-card" id="card-active-bricks">
                     <span class="stat-label">Active Bricks Culled</span>
                     <span id="stat-bricks" class="stat-value">0 / 0 (0%)</span>
+                </div>
+                <div class="stat-card" id="card-mvdc-cells">
+                    <span class="stat-label">MVDC Ambiguous Cells Split</span>
+                    <span id="stat-mvdc" class="stat-value">0</span>
                 </div>
                 <div class="stat-card breakdown-card">
                     <span class="stat-label">CUDA Pipeline Breakdown</span>

@@ -170,7 +170,14 @@ PYBIND11_MODULE(_contouring_cpp_module, m) {
         .def_readwrite("face_count", &DualContouringStats::face_count)
         .def_readwrite("qef_fallback_count", &DualContouringStats::qef_fallback_count)
         .def_readwrite("clamp_count", &DualContouringStats::clamp_count)
-        .def_readwrite("invalid_count", &DualContouringStats::invalid_count);
+        .def_readwrite("invalid_count", &DualContouringStats::invalid_count)
+        .def_readwrite("ambiguous_cells", &DualContouringStats::ambiguous_cells)
+        .def_readwrite("multi_vertex_cells", &DualContouringStats::multi_vertex_cells)
+        .def_readwrite("one_vertex_cells", &DualContouringStats::one_vertex_cells)
+        .def_readwrite("two_vertex_cells", &DualContouringStats::two_vertex_cells)
+        .def_readwrite("split_rejection_count", &DualContouringStats::split_rejection_count)
+        .def_readwrite("bad_qef_count", &DualContouringStats::bad_qef_count)
+        .def_readwrite("faces_skipped_due_to_missing_cluster", &DualContouringStats::faces_skipped_due_to_missing_cluster);
 
     py::class_<CpuDualContouringBackend>(m, "CpuDualContouringBackend")
         .def(py::init<>())
@@ -216,19 +223,41 @@ PYBIND11_MODULE(_contouring_cpp_module, m) {
         });
 
     py::class_<CudaSparseDualContouringBackend>(m, "CudaSparseDualContouringBackend")
-        .def(py::init<int, NormalComputationMode, int>(),
+        .def(py::init<int, NormalComputationMode, int, bool>(),
             py::arg("brick_size") = 8,
             py::arg("normal_mode") = NormalComputationMode::FiniteDifference,
-            py::arg("chunk_size") = 0)
+            py::arg("chunk_size") = 0,
+            py::arg("multi_vertex_cells") = false)
         .def_readwrite("brick_size", &CudaSparseDualContouringBackend::brick_size)
         .def_readwrite("normal_mode", &CudaSparseDualContouringBackend::normal_mode)
         .def_readwrite("chunk_size", &CudaSparseDualContouringBackend::chunk_size)
+        .def_readwrite("multi_vertex_cells", &CudaSparseDualContouringBackend::multi_vertex_cells)
         .def("extract", [](CudaSparseDualContouringBackend& self, const DenseSdfGrid& grid) {
             DualContouringStats stats;
             DualContouringMesh mesh = self.extract(grid, stats);
             return py::make_tuple(mesh, stats);
         })
         .def("extract_device", [](CudaSparseDualContouringBackend& self, const DenseSdfGridDevice& grid) {
+            DualContouringStats stats;
+            DualContouringMesh mesh = self.extract_device(grid, stats);
+            return py::make_tuple(mesh, stats);
+        });
+
+    py::class_<CudaSparseMvdcDualContouringBackend>(m, "CudaSparseMvdcDualContouringBackend")
+        .def(py::init<int, NormalComputationMode, int>(),
+            py::arg("brick_size") = 8,
+            py::arg("normal_mode") = NormalComputationMode::FiniteDifference,
+            py::arg("chunk_size") = 0)
+        .def_readwrite("brick_size", &CudaSparseMvdcDualContouringBackend::brick_size)
+        .def_readwrite("normal_mode", &CudaSparseMvdcDualContouringBackend::normal_mode)
+        .def_readwrite("chunk_size", &CudaSparseMvdcDualContouringBackend::chunk_size)
+        .def_readwrite("multi_vertex_cells", &CudaSparseMvdcDualContouringBackend::multi_vertex_cells)
+        .def("extract", [](CudaSparseMvdcDualContouringBackend& self, const DenseSdfGrid& grid) {
+            DualContouringStats stats;
+            DualContouringMesh mesh = self.extract(grid, stats);
+            return py::make_tuple(mesh, stats);
+        })
+        .def("extract_device", [](CudaSparseMvdcDualContouringBackend& self, const DenseSdfGridDevice& grid) {
             DualContouringStats stats;
             DualContouringMesh mesh = self.extract_device(grid, stats);
             return py::make_tuple(mesh, stats);

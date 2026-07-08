@@ -54,13 +54,17 @@ async def extract_mesh(
         ox, oy, oz = float(-1.0), float(-1.0), float(-1.0)
         vx, vy, vz = float(2.0 / (res - 1)), float(2.0 / (res - 1)), float(2.0 / (res - 1))
 
-        if backend.lower() in ["cuda-sparse", "sparse", "cuda", "cuda-dense"]:
+        if backend.lower() in ["cuda-sparse", "sparse", "cuda", "cuda-dense", "cuda-sparse-mvdc", "mvdc", "multi-vertex"]:
             dev_grid, sdf_ms = contouring.mesh_to_sdf_device_cuda(
                 V_gt.astype(np.float32), F_gt.astype(np.int32),
                 int(res), int(res), int(res),
                 ox, oy, oz, vx, vy, vz
             )
-            if backend.lower() in ["cuda-sparse", "sparse"]:
+            if backend.lower() in ["cuda-sparse-mvdc", "mvdc", "multi-vertex"]:
+                engine = contouring.CudaSparseMvdcDualContouringBackend(brick_size)
+                out_mesh, stats = engine.extract_device(dev_grid)
+                backend_name = f"CUDA Sparse MVDC (K={brick_size})"
+            elif backend.lower() in ["cuda-sparse", "sparse"]:
                 engine = contouring.CudaSparseDualContouringBackend(brick_size)
                 out_mesh, stats = engine.extract_device(dev_grid)
                 backend_name = f"CUDA Sparse Tiled (K={brick_size})"
@@ -116,6 +120,9 @@ async def extract_mesh(
                 "active_bricks": stats.active_bricks,
                 "active_cells": stats.active_cells,
                 "total_cells": stats.total_cells,
+                "ambiguous_cells": getattr(stats, "ambiguous_cells", 0),
+                "multi_vertex_cells": getattr(stats, "multi_vertex_cells", 0),
+                "split_rejection_count": getattr(stats, "split_rejection_count", 0),
                 "res": res
             }
         })

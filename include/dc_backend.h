@@ -64,7 +64,14 @@ struct DualContouringStats {
     int qef_fallback_count;
     int clamp_count;
     int invalid_count;
-    DualContouringStats() : backend(""), nx(0), ny(0), nz(0), total_cells(0), active_cells(0), total_bricks(0), active_bricks(0), upload_ms(0.0f), marking_ms(0.0f), compaction_ms(0.0f), active_brick_marking_ms(0.0f), active_brick_compaction_ms(0.0f), active_cell_marking_ms(0.0f), active_cell_compaction_ms(0.0f), qef_ms(0.0f), face_emission_ms(0.0f), face_count_ms(0.0f), face_prefix_sum_ms(0.0f), face_fill_ms(0.0f), download_ms(0.0f), total_ms(0.0f), vertex_count(0), face_count(0), qef_fallback_count(0), clamp_count(0), invalid_count(0) {}
+    int ambiguous_cells;
+    int multi_vertex_cells;
+    int one_vertex_cells;
+    int two_vertex_cells;
+    int split_rejection_count;
+    int bad_qef_count;
+    int faces_skipped_due_to_missing_cluster;
+    DualContouringStats() : backend(""), nx(0), ny(0), nz(0), total_cells(0), active_cells(0), total_bricks(0), active_bricks(0), upload_ms(0.0f), marking_ms(0.0f), compaction_ms(0.0f), active_brick_marking_ms(0.0f), active_brick_compaction_ms(0.0f), active_cell_marking_ms(0.0f), active_cell_compaction_ms(0.0f), qef_ms(0.0f), face_emission_ms(0.0f), face_count_ms(0.0f), face_prefix_sum_ms(0.0f), face_fill_ms(0.0f), download_ms(0.0f), total_ms(0.0f), vertex_count(0), face_count(0), qef_fallback_count(0), clamp_count(0), invalid_count(0), ambiguous_cells(0), multi_vertex_cells(0), one_vertex_cells(0), two_vertex_cells(0), split_rejection_count(0), bad_qef_count(0), faces_skipped_due_to_missing_cluster(0) {}
 };
 
 class IDualContouringBackend {

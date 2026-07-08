@@ -26,12 +26,20 @@ struct SparseGridParams {
     float vx, vy, vz;
     float ox, oy, oz;
     NormalComputationMode normal_mode;
+    bool multi_vertex_cells;
 };
 
 struct SparseDeviceCounters {
     int qef_fallbacks;
     int out_of_cell_clamps;
     int invalid_count;
+    int ambiguous_cells;
+    int multi_vertex_cells;
+    int one_vertex_cells;
+    int two_vertex_cells;
+    int split_rejections;
+    int bad_qef_count;
+    int faces_skipped;
 };
 
 __device__ __host__ inline int sparse_grid_index(int ix, int iy, int iz, int nx, int ny, int nz) {
@@ -374,12 +382,76 @@ __global__ void mark_active_cells_sparse_kernel(
     }
 }
 
-__global__ void compute_vertices_sparse_kernel(
+__device__ inline float3 sparse_solve_qef_cluster(
+    const float3* pts,
+    const float3* normals,
+    int m,
+    float3 cell_min,
+    float3 cell_max,
+    SparseGridParams params,
+    SparseDeviceCounters* d_counters
+) {
+    if (m == 0) {
+        return sparse_operator_plus(cell_min, sparse_operator_mul(0.5f, make_float3(params.vx, params.vy, params.vz)));
+    }
+    float3 centroid = make_float3(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < m; ++i) {
+        centroid = sparse_operator_plus(centroid, pts[i]);
+    }
+    centroid = sparse_operator_mul(1.0f / (float)m, centroid);
+
+    float B[9] = {0.0f};
+    float d[3] = {0.0f};
+    for (int i = 0; i < m; ++i) {
+        float3 n = normals[i];
+        float3 diff = sparse_operator_minus(pts[i], centroid);
+        float dot_val = sparse_dot(n, diff);
+
+        B[0] += n.x * n.x; B[1] += n.x * n.y; B[2] += n.x * n.z;
+        B[3] += n.y * n.x; B[4] += n.y * n.y; B[5] += n.y * n.z;
+        B[6] += n.z * n.x; B[7] += n.z * n.y; B[8] += n.z * n.z;
+
+        d[0] += n.x * dot_val;
+        d[1] += n.y * dot_val;
+        d[2] += n.z * dot_val;
+    }
+
+    float y[3] = {0.0f};
+    bool singular = false;
+    sparse_jacobi_solve_3x3(B, d, 0.01f, y, singular);
+
+    float3 vertex = sparse_operator_plus(centroid, make_float3(y[0], y[1], y[2]));
+
+    bool has_nan_inf = isnan(vertex.x) || isnan(vertex.y) || isnan(vertex.z) ||
+                       isinf(vertex.x) || isinf(vertex.y) || isinf(vertex.z);
+
+    if (singular || has_nan_inf) {
+        atomicAdd(&d_counters->qef_fallbacks, 1);
+        vertex = centroid;
+    }
+
+    if (isnan(vertex.x) || isnan(vertex.y) || isnan(vertex.z) ||
+        isinf(vertex.x) || isinf(vertex.y) || isinf(vertex.z)) {
+        atomicAdd(&d_counters->invalid_count, 1);
+        vertex = sparse_operator_plus(cell_min, sparse_operator_mul(0.5f, make_float3(params.vx, params.vy, params.vz)));
+    }
+
+    if (vertex.x < cell_min.x || vertex.x > cell_max.x ||
+        vertex.y < cell_min.y || vertex.y > cell_max.y ||
+        vertex.z < cell_min.z || vertex.z > cell_max.z) {
+        atomicAdd(&d_counters->out_of_cell_clamps, 1);
+        vertex.x = fmaxf(cell_min.x, fminf(cell_max.x, vertex.x));
+        vertex.y = fmaxf(cell_min.y, fminf(cell_max.y, vertex.y));
+        vertex.z = fmaxf(cell_min.z, fminf(cell_max.z, vertex.z));
+    }
+    return vertex;
+}
+
+__global__ void count_cell_vertices_sparse_kernel(
     const int* d_active_cell_indices,
     const float* d_sdf,
     const float3* d_precomputed_gradients,
-    float3* d_vertices,
-    int* d_cell_to_vertex_map,
+    int* d_active_cell_vertex_counts,
     int active_cell_count,
     SparseGridParams params,
     SparseDeviceCounters* d_counters
@@ -387,9 +459,12 @@ __global__ void compute_vertices_sparse_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= active_cell_count) return;
 
-    int cell_idx = d_active_cell_indices[idx];
-    d_cell_to_vertex_map[cell_idx] = idx;
+    if (!params.multi_vertex_cells) {
+        d_active_cell_vertex_counts[idx] = 1;
+        return;
+    }
 
+    int cell_idx = d_active_cell_indices[idx];
     int ix = 0, iy = 0, iz = 0;
     sparse_unflatten_cell(cell_idx, params.nx, params.ny, params.nz, ix, iy, iz);
 
@@ -422,10 +497,8 @@ __global__ void compute_vertices_sparse_kernel(
     for (int e = 0; e < 12; ++e) {
         int a = edge_pairs[e][0];
         int b = edge_pairs[e][1];
-
         float fa = corner_sdf_vals[a];
         float fb = corner_sdf_vals[b];
-
         int a_ix = ix + corner_offsets[a][0];
         int a_iy = iy + corner_offsets[a][1];
         int a_iz = iz + corner_offsets[a][2];
@@ -444,7 +517,6 @@ __global__ void compute_vertices_sparse_kernel(
                 t = fabsf(fa) / (fabsf(fa) + fabsf(fb) + 1e-12f);
             }
             t = fmaxf(0.0f, fminf(1.0f, t));
-
             float3 pa = corner_pos_vals[a];
             float3 pb = corner_pos_vals[b];
             float3 p = sparse_operator_plus(sparse_operator_mul(1.0f - t, pa), sparse_operator_mul(t, pb));
@@ -492,17 +564,195 @@ __global__ void compute_vertices_sparse_kernel(
                 } else {
                     n = sparse_gradient_trilinear(corner_sdf_vals, corner_pos_vals, p);
                 }
-
                 float n_len = sqrtf(sparse_dot(n, n));
-                if (n_len > 1e-6f) {
-                    n = sparse_operator_mul(1.0f / n_len, n);
-                }
-
+                if (n_len > 1e-6f) n = sparse_operator_mul(1.0f / n_len, n);
                 if (m < 12) {
-                    pts[m] = p;
-                    normals[m] = n;
-                    centroid = sparse_operator_plus(centroid, p);
-                    m++;
+                    pts[m] = p; normals[m] = n; centroid = sparse_operator_plus(centroid, p); m++;
+                }
+            }
+        }
+    }
+
+    if (m < 2) {
+        d_active_cell_vertex_counts[idx] = 1;
+        atomicAdd(&d_counters->one_vertex_cells, 1);
+        return;
+    }
+
+    int best_A = -1;
+    int best_B = -1;
+    float min_dot = 1.0f;
+    for (int i = 0; i < m; ++i) {
+        for (int j = i + 1; j < m; ++j) {
+            float dt = sparse_dot(normals[i], normals[j]);
+            if (dt < min_dot) {
+                min_dot = dt;
+                best_A = i;
+                best_B = j;
+            }
+        }
+    }
+
+    if (best_A < 0 || best_B < 0 || min_dot >= -0.3f) {
+        d_active_cell_vertex_counts[idx] = 1;
+        atomicAdd(&d_counters->one_vertex_cells, 1);
+        return;
+    }
+
+    float3 nA = normals[best_A];
+    float3 nB = normals[best_B];
+    int countA = 0;
+    int countB = 0;
+    for (int i = 0; i < m; ++i) {
+        if (sparse_dot(normals[i], nA) >= sparse_dot(normals[i], nB)) {
+            countA++;
+        } else {
+            countB++;
+        }
+    }
+
+    if (countA < 2 || countB < 2) {
+        d_active_cell_vertex_counts[idx] = 1;
+        atomicAdd(&d_counters->split_rejections, 1);
+        atomicAdd(&d_counters->one_vertex_cells, 1);
+        return;
+    }
+
+    d_active_cell_vertex_counts[idx] = 2;
+    atomicAdd(&d_counters->ambiguous_cells, 1);
+    atomicAdd(&d_counters->multi_vertex_cells, 1);
+    atomicAdd(&d_counters->two_vertex_cells, 1);
+}
+
+__global__ void compute_vertices_sparse_kernel(
+    const int* d_active_cell_indices,
+    const float* d_sdf,
+    const float3* d_precomputed_gradients,
+    float3* d_vertices,
+    float3* d_vertex_normals,
+    int* d_cell_to_vertex_map,
+    int* d_cell_vertex_counts_map,
+    const int* d_scanned_vertex_counts,
+    const int* d_active_cell_vertex_counts,
+    int active_cell_count,
+    SparseGridParams params,
+    SparseDeviceCounters* d_counters
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= active_cell_count) return;
+
+    int cell_idx = d_active_cell_indices[idx];
+    int start_v = (d_scanned_vertex_counts != nullptr && params.multi_vertex_cells) ? d_scanned_vertex_counts[idx] : idx;
+    int count_v = (d_active_cell_vertex_counts != nullptr && params.multi_vertex_cells) ? d_active_cell_vertex_counts[idx] : 1;
+
+    d_cell_to_vertex_map[cell_idx] = start_v;
+    if (d_cell_vertex_counts_map != nullptr) {
+        d_cell_vertex_counts_map[cell_idx] = count_v;
+    }
+
+    int ix = 0, iy = 0, iz = 0;
+    sparse_unflatten_cell(cell_idx, params.nx, params.ny, params.nz, ix, iy, iz);
+
+    const int corner_offsets[8][3] = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+        {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}
+    };
+
+    const int edge_pairs[12][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7}
+    };
+
+    float corner_sdf_vals[8];
+    float3 corner_pos_vals[8];
+    for (int c = 0; c < 8; ++c) {
+        int c_ix = ix + corner_offsets[c][0];
+        int c_iy = iy + corner_offsets[c][1];
+        int c_iz = iz + corner_offsets[c][2];
+        corner_sdf_vals[c] = d_sdf[sparse_grid_index(c_ix, c_iy, c_iz, params.nx, params.ny, params.nz)];
+        corner_pos_vals[c] = make_float3(params.ox + c_ix * params.vx, params.oy + c_iy * params.vy, params.oz + c_iz * params.vz);
+    }
+
+    float3 pts[12];
+    float3 normals[12];
+    float3 centroid = make_float3(0.0f, 0.0f, 0.0f);
+    int m = 0;
+
+    for (int e = 0; e < 12; ++e) {
+        int a = edge_pairs[e][0];
+        int b = edge_pairs[e][1];
+        float fa = corner_sdf_vals[a];
+        float fb = corner_sdf_vals[b];
+        int a_ix = ix + corner_offsets[a][0];
+        int a_iy = iy + corner_offsets[a][1];
+        int a_iz = iz + corner_offsets[a][2];
+        int b_ix = ix + corner_offsets[b][0];
+        int b_iy = iy + corner_offsets[b][1];
+        int b_iz = iz + corner_offsets[b][2];
+
+        bool is_crossing = (fa * fb <= 0.0f);
+        bool is_thin = (!is_crossing && sparse_is_thin_edge(fa, fb, a_ix, a_iy, a_iz, b_ix, b_iy, b_iz, d_sdf, params));
+
+        if (is_crossing || is_thin) {
+            float t = 0.5f;
+            if (is_crossing) {
+                t = fa / (fa - fb + 1e-12f);
+            } else {
+                t = fabsf(fa) / (fabsf(fa) + fabsf(fb) + 1e-12f);
+            }
+            t = fmaxf(0.0f, fminf(1.0f, t));
+            float3 pa = corner_pos_vals[a];
+            float3 pb = corner_pos_vals[b];
+            float3 p = sparse_operator_plus(sparse_operator_mul(1.0f - t, pa), sparse_operator_mul(t, pb));
+
+            if (is_thin) {
+                float3 ga = sparse_get_gradient(d_sdf, a_ix, a_iy, a_iz, params);
+                float3 gb = sparse_get_gradient(d_sdf, b_ix, b_iy, b_iz, params);
+                float ga_len = sqrtf(sparse_dot(ga, ga));
+                float gb_len = sqrtf(sparse_dot(gb, gb));
+                if (ga_len > 1e-6f) ga = sparse_operator_mul(1.0f / ga_len, ga);
+                if (gb_len > 1e-6f) gb = sparse_operator_mul(1.0f / gb_len, gb);
+                if (m < 11) {
+                    pts[m] = p; normals[m] = ga; centroid = sparse_operator_plus(centroid, p); m++;
+                    pts[m] = p; normals[m] = gb; centroid = sparse_operator_plus(centroid, p); m++;
+                }
+            } else {
+                float3 n = make_float3(0.0f, 0.0f, 0.0f);
+                if (params.normal_mode == NormalComputationMode::FiniteDifference) {
+                    n = sparse_gradient_trilinear(corner_sdf_vals, corner_pos_vals, p);
+                } else if (params.normal_mode == NormalComputationMode::EdgeGradient) {
+                    float3 ga = sparse_get_gradient(d_sdf, a_ix, a_iy, a_iz, params);
+                    float3 gb = sparse_get_gradient(d_sdf, b_ix, b_iy, b_iz, params);
+                    n = sparse_operator_plus(sparse_operator_mul(1.0f - t, ga), sparse_operator_mul(t, gb));
+                } else if (params.normal_mode == NormalComputationMode::PrecomputedGradient && d_precomputed_gradients != nullptr) {
+                    float3 corner_grad_vals[8];
+                    for (int c = 0; c < 8; ++c) {
+                        int c_ix = ix + corner_offsets[c][0];
+                        int c_iy = iy + corner_offsets[c][1];
+                        int c_iz = iz + corner_offsets[c][2];
+                        corner_grad_vals[c] = d_precomputed_gradients[sparse_grid_index(c_ix, c_iy, c_iz, params.nx, params.ny, params.nz)];
+                    }
+                    float u = (p.x - corner_pos_vals[0].x) / params.vx;
+                    float v = (p.y - corner_pos_vals[0].y) / params.vy;
+                    float w = (p.z - corner_pos_vals[0].z) / params.vz;
+                    u = fmaxf(0.0f, fminf(1.0f, u));
+                    v = fmaxf(0.0f, fminf(1.0f, v));
+                    w = fmaxf(0.0f, fminf(1.0f, w));
+                    float3 g00 = sparse_operator_plus(sparse_operator_mul(1.0f - u, corner_grad_vals[0]), sparse_operator_mul(u, corner_grad_vals[1]));
+                    float3 g10 = sparse_operator_plus(sparse_operator_mul(1.0f - u, corner_grad_vals[3]), sparse_operator_mul(u, corner_grad_vals[2]));
+                    float3 g01 = sparse_operator_plus(sparse_operator_mul(1.0f - u, corner_grad_vals[4]), sparse_operator_mul(u, corner_grad_vals[5]));
+                    float3 g11 = sparse_operator_plus(sparse_operator_mul(1.0f - u, corner_grad_vals[7]), sparse_operator_mul(u, corner_grad_vals[6]));
+                    float3 g0 = sparse_operator_plus(sparse_operator_mul(1.0f - v, g00), sparse_operator_mul(v, g10));
+                    float3 g1 = sparse_operator_plus(sparse_operator_mul(1.0f - v, g01), sparse_operator_mul(v, g11));
+                    n = sparse_operator_plus(sparse_operator_mul(1.0f - w, g0), sparse_operator_mul(w, g1));
+                } else {
+                    n = sparse_gradient_trilinear(corner_sdf_vals, corner_pos_vals, p);
+                }
+                float n_len = sqrtf(sparse_dot(n, n));
+                if (n_len > 1e-6f) n = sparse_operator_mul(1.0f / n_len, n);
+                if (m < 12) {
+                    pts[m] = p; normals[m] = n; centroid = sparse_operator_plus(centroid, p); m++;
                 }
             }
         }
@@ -511,65 +761,106 @@ __global__ void compute_vertices_sparse_kernel(
     float3 cell_min = corner_pos_vals[0];
     float3 cell_max = corner_pos_vals[6];
 
-    if (m == 0) {
-        d_vertices[idx] = sparse_operator_plus(cell_min, sparse_operator_mul(0.5f, make_float3(params.vx, params.vy, params.vz)));
+    if (count_v == 1 || m < 2) {
+        float3 v0 = sparse_solve_qef_cluster(pts, normals, m, cell_min, cell_max, params, d_counters);
+        d_vertices[start_v] = v0;
+        if (d_vertex_normals != nullptr) {
+            float3 avg_n = make_float3(0.0f, 0.0f, 0.0f);
+            for (int i = 0; i < m; ++i) avg_n = sparse_operator_plus(avg_n, normals[i]);
+            float len = sqrtf(sparse_dot(avg_n, avg_n));
+            d_vertex_normals[start_v] = (len > 1e-6f) ? sparse_operator_mul(1.0f / len, avg_n) : make_float3(0.0f, 1.0f, 0.0f);
+        }
         return;
     }
 
-    centroid = sparse_operator_mul(1.0f / (float)m, centroid);
-
-    float B[9] = {0.0f};
-    float d[3] = {0.0f};
+    int best_A = -1;
+    int best_B = -1;
+    float min_dot = 1.0f;
     for (int i = 0; i < m; ++i) {
-        float3 n = normals[i];
-        float3 diff = sparse_operator_minus(pts[i], centroid);
-        float dot_val = sparse_dot(n, diff);
-
-        B[0] += n.x * n.x; B[1] += n.x * n.y; B[2] += n.x * n.z;
-        B[3] += n.y * n.x; B[4] += n.y * n.y; B[5] += n.y * n.z;
-        B[6] += n.z * n.x; B[7] += n.z * n.y; B[8] += n.z * n.z;
-
-        d[0] += n.x * dot_val;
-        d[1] += n.y * dot_val;
-        d[2] += n.z * dot_val;
+        for (int j = i + 1; j < m; ++j) {
+            float dt = sparse_dot(normals[i], normals[j]);
+            if (dt < min_dot) {
+                min_dot = dt;
+                best_A = i;
+                best_B = j;
+            }
+        }
     }
 
-    float y[3] = {0.0f};
-    bool singular = false;
-    sparse_jacobi_solve_3x3(B, d, 0.01f, y, singular);
-
-    float3 vertex = sparse_operator_plus(centroid, make_float3(y[0], y[1], y[2]));
-
-    bool has_nan_inf = isnan(vertex.x) || isnan(vertex.y) || isnan(vertex.z) ||
-                       isinf(vertex.x) || isinf(vertex.y) || isinf(vertex.z);
-
-    if (singular || has_nan_inf) {
-        atomicAdd(&d_counters->qef_fallbacks, 1);
-        vertex = centroid;
+    if (best_A < 0 || best_B < 0) {
+        float3 v0 = sparse_solve_qef_cluster(pts, normals, m, cell_min, cell_max, params, d_counters);
+        d_vertices[start_v] = v0;
+        if (d_vertex_normals != nullptr) d_vertex_normals[start_v] = make_float3(0.0f, 1.0f, 0.0f);
+        return;
     }
 
-    if (isnan(vertex.x) || isnan(vertex.y) || isnan(vertex.z) ||
-        isinf(vertex.x) || isinf(vertex.y) || isinf(vertex.z)) {
-        atomicAdd(&d_counters->invalid_count, 1);
-        vertex = sparse_operator_plus(cell_min, sparse_operator_mul(0.5f, make_float3(params.vx, params.vy, params.vz)));
+    float3 nA = normals[best_A];
+    float3 nB = normals[best_B];
+
+    float3 pts0[12];
+    float3 normals0[12];
+    int m0 = 0;
+    float3 pts1[12];
+    float3 normals1[12];
+    int m1 = 0;
+
+    for (int i = 0; i < m; ++i) {
+        if (sparse_dot(normals[i], nA) >= sparse_dot(normals[i], nB)) {
+            pts0[m0] = pts[i]; normals0[m0] = normals[i]; m0++;
+        } else {
+            pts1[m1] = pts[i]; normals1[m1] = normals[i]; m1++;
+        }
     }
 
-    if (vertex.x < cell_min.x || vertex.x > cell_max.x ||
-        vertex.y < cell_min.y || vertex.y > cell_max.y ||
-        vertex.z < cell_min.z || vertex.z > cell_max.z) {
-        atomicAdd(&d_counters->out_of_cell_clamps, 1);
-        vertex.x = fmaxf(cell_min.x, fminf(cell_max.x, vertex.x));
-        vertex.y = fmaxf(cell_min.y, fminf(cell_max.y, vertex.y));
-        vertex.z = fmaxf(cell_min.z, fminf(cell_max.z, vertex.z));
-    }
+    float3 v0 = sparse_solve_qef_cluster(pts0, normals0, m0, cell_min, cell_max, params, d_counters);
+    float3 v1 = sparse_solve_qef_cluster(pts1, normals1, m1, cell_min, cell_max, params, d_counters);
 
-    d_vertices[idx] = vertex;
+    d_vertices[start_v + 0] = v0;
+    d_vertices[start_v + 1] = v1;
+
+    if (d_vertex_normals != nullptr) {
+        float3 avg0 = make_float3(0.0f, 0.0f, 0.0f);
+        for (int i = 0; i < m0; ++i) avg0 = sparse_operator_plus(avg0, normals0[i]);
+        float len0 = sqrtf(sparse_dot(avg0, avg0));
+        d_vertex_normals[start_v + 0] = (len0 > 1e-6f) ? sparse_operator_mul(1.0f / len0, avg0) : nA;
+
+        float3 avg1 = make_float3(0.0f, 0.0f, 0.0f);
+        for (int i = 0; i < m1; ++i) avg1 = sparse_operator_plus(avg1, normals1[i]);
+        float len1 = sqrtf(sparse_dot(avg1, avg1));
+        d_vertex_normals[start_v + 1] = (len1 > 1e-6f) ? sparse_operator_mul(1.0f / len1, avg1) : nB;
+    }
+}
+
+__device__ inline int sparse_select_cell_vertex(
+    int cell_idx,
+    const int* d_cell_to_vertex_map,
+    const int* d_cell_vertex_counts_map,
+    const float3* d_vertex_normals,
+    float3 g_n,
+    bool multi_vertex_cells
+) {
+    int start = d_cell_to_vertex_map[cell_idx];
+    if (start < 0) return -1;
+    if (!multi_vertex_cells || d_cell_vertex_counts_map == nullptr || d_vertex_normals == nullptr) return start;
+    int count = d_cell_vertex_counts_map[cell_idx];
+    if (count <= 0) return -1;
+    if (count == 1) return start;
+    float dot0 = sparse_dot(g_n, d_vertex_normals[start + 0]);
+    float dot1 = sparse_dot(g_n, d_vertex_normals[start + 1]);
+    int best = (dot0 >= dot1) ? (start + 0) : (start + 1);
+    float best_dot = fmaxf(dot0, dot1);
+    if (best_dot < -0.5f) {
+        return -1;
+    }
+    return best;
 }
 
 __global__ void count_sparse_faces_kernel(
     const int* d_active_cell_indices,
     const float* d_sdf,
     const int* d_cell_to_vertex_map,
+    const int* d_cell_vertex_counts_map,
+    const float3* d_vertex_normals,
     int* d_active_cell_face_counts,
     int active_cell_count,
     SparseGridParams params
@@ -589,12 +880,16 @@ __global__ void count_sparse_faces_kernel(
         bool is_crossing = (d_sdf[g0] * d_sdf[g1] < 0.0f);
         bool is_thin = (!is_crossing && sparse_is_thin_edge(d_sdf[g0], d_sdf[g1], ix, iy, iz, ix + 1, iy, iz, d_sdf, params));
         if (is_crossing || is_thin) {
+            float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix + 1, iy, iz, params));
             int c0 = sparse_cell_index(ix, iy - 1, iz - 1, params.nx, params.ny, params.nz);
             int c1 = sparse_cell_index(ix, iy, iz - 1, params.nx, params.ny, params.nz);
             int c2 = sparse_cell_index(ix, iy, iz, params.nx, params.ny, params.nz);
             int c3 = sparse_cell_index(ix, iy - 1, iz, params.nx, params.ny, params.nz);
-            if (d_cell_to_vertex_map[c0] >= 0 && d_cell_to_vertex_map[c1] >= 0 &&
-                d_cell_to_vertex_map[c2] >= 0 && d_cell_to_vertex_map[c3] >= 0) {
+            int v0 = sparse_select_cell_vertex(c0, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v1 = sparse_select_cell_vertex(c1, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v2 = sparse_select_cell_vertex(c2, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v3 = sparse_select_cell_vertex(c3, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
                 count += is_thin ? 2 : 1;
             }
         }
@@ -606,12 +901,16 @@ __global__ void count_sparse_faces_kernel(
         bool is_crossing = (d_sdf[g0] * d_sdf[g1] < 0.0f);
         bool is_thin = (!is_crossing && sparse_is_thin_edge(d_sdf[g0], d_sdf[g1], ix, iy, iz, ix, iy + 1, iz, d_sdf, params));
         if (is_crossing || is_thin) {
+            float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix, iy + 1, iz, params));
             int c0 = sparse_cell_index(ix - 1, iy, iz - 1, params.nx, params.ny, params.nz);
             int c1 = sparse_cell_index(ix, iy, iz - 1, params.nx, params.ny, params.nz);
             int c2 = sparse_cell_index(ix, iy, iz, params.nx, params.ny, params.nz);
             int c3 = sparse_cell_index(ix - 1, iy, iz, params.nx, params.ny, params.nz);
-            if (d_cell_to_vertex_map[c0] >= 0 && d_cell_to_vertex_map[c1] >= 0 &&
-                d_cell_to_vertex_map[c2] >= 0 && d_cell_to_vertex_map[c3] >= 0) {
+            int v0 = sparse_select_cell_vertex(c0, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v1 = sparse_select_cell_vertex(c1, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v2 = sparse_select_cell_vertex(c2, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v3 = sparse_select_cell_vertex(c3, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
                 count += is_thin ? 2 : 1;
             }
         }
@@ -623,12 +922,16 @@ __global__ void count_sparse_faces_kernel(
         bool is_crossing = (d_sdf[g0] * d_sdf[g1] < 0.0f);
         bool is_thin = (!is_crossing && sparse_is_thin_edge(d_sdf[g0], d_sdf[g1], ix, iy, iz, ix, iy, iz + 1, d_sdf, params));
         if (is_crossing || is_thin) {
+            float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix, iy, iz + 1, params));
             int c0 = sparse_cell_index(ix - 1, iy - 1, iz, params.nx, params.ny, params.nz);
             int c1 = sparse_cell_index(ix, iy - 1, iz, params.nx, params.ny, params.nz);
             int c2 = sparse_cell_index(ix, iy, iz, params.nx, params.ny, params.nz);
             int c3 = sparse_cell_index(ix - 1, iy, iz, params.nx, params.ny, params.nz);
-            if (d_cell_to_vertex_map[c0] >= 0 && d_cell_to_vertex_map[c1] >= 0 &&
-                d_cell_to_vertex_map[c2] >= 0 && d_cell_to_vertex_map[c3] >= 0) {
+            int v0 = sparse_select_cell_vertex(c0, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v1 = sparse_select_cell_vertex(c1, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v2 = sparse_select_cell_vertex(c2, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v3 = sparse_select_cell_vertex(c3, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
                 count += is_thin ? 2 : 1;
             }
         }
@@ -641,12 +944,15 @@ __global__ void emit_sparse_faces_kernel(
     const int* d_active_cell_indices,
     const float* d_sdf,
     const int* d_cell_to_vertex_map,
+    const int* d_cell_vertex_counts_map,
     const float3* d_vertices,
+    const float3* d_vertex_normals,
     const int* d_active_cell_face_counts,
     const int* d_scanned_face_counts,
     int* d_faces,
     int active_cell_count,
-    SparseGridParams params
+    SparseGridParams params,
+    SparseDeviceCounters* d_counters
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= active_cell_count) return;
@@ -664,14 +970,15 @@ __global__ void emit_sparse_faces_kernel(
         bool is_crossing = (d_sdf[g0] * d_sdf[g1] < 0.0f);
         bool is_thin = (!is_crossing && sparse_is_thin_edge(d_sdf[g0], d_sdf[g1], ix, iy, iz, ix + 1, iy, iz, d_sdf, params));
         if (is_crossing || is_thin) {
+            float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix + 1, iy, iz, params));
             int c0 = sparse_cell_index(ix, iy - 1, iz - 1, params.nx, params.ny, params.nz);
             int c1 = sparse_cell_index(ix, iy, iz - 1, params.nx, params.ny, params.nz);
             int c2 = sparse_cell_index(ix, iy, iz, params.nx, params.ny, params.nz);
             int c3 = sparse_cell_index(ix, iy - 1, iz, params.nx, params.ny, params.nz);
-            int v0 = d_cell_to_vertex_map[c0];
-            int v1 = d_cell_to_vertex_map[c1];
-            int v2 = d_cell_to_vertex_map[c2];
-            int v3 = d_cell_to_vertex_map[c3];
+            int v0 = sparse_select_cell_vertex(c0, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v1 = sparse_select_cell_vertex(c1, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v2 = sparse_select_cell_vertex(c2, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v3 = sparse_select_cell_vertex(c3, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
             if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
                 float3 pa = d_vertices[v0];
                 float3 pb = d_vertices[v1];
@@ -681,7 +988,6 @@ __global__ void emit_sparse_faces_kernel(
                 if (sparse_dot(quad_n, quad_n) < 1e-12f) {
                     quad_n = sparse_cross(sparse_operator_minus(pc, pa), sparse_operator_minus(pd, pa));
                 }
-                float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix + 1, iy, iz, params));
                 if (sparse_dot(g_n, g_n) > 0.0f && sparse_dot(quad_n, quad_n) > 0.0f) {
                     if (sparse_dot(quad_n, g_n) < 0.0f) {
                         int tmp = v1; v1 = v3; v3 = tmp;
@@ -699,6 +1005,8 @@ __global__ void emit_sparse_faces_kernel(
                     d_faces[4 * out_idx + 3] = v1;
                     out_idx++;
                 }
+            } else if (params.multi_vertex_cells) {
+                atomicAdd(&d_counters->faces_skipped, 1);
             }
         }
     }
@@ -709,14 +1017,15 @@ __global__ void emit_sparse_faces_kernel(
         bool is_crossing = (d_sdf[g0] * d_sdf[g1] < 0.0f);
         bool is_thin = (!is_crossing && sparse_is_thin_edge(d_sdf[g0], d_sdf[g1], ix, iy, iz, ix, iy + 1, iz, d_sdf, params));
         if (is_crossing || is_thin) {
+            float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix, iy + 1, iz, params));
             int c0 = sparse_cell_index(ix - 1, iy, iz - 1, params.nx, params.ny, params.nz);
             int c1 = sparse_cell_index(ix, iy, iz - 1, params.nx, params.ny, params.nz);
             int c2 = sparse_cell_index(ix, iy, iz, params.nx, params.ny, params.nz);
             int c3 = sparse_cell_index(ix - 1, iy, iz, params.nx, params.ny, params.nz);
-            int v0 = d_cell_to_vertex_map[c0];
-            int v1 = d_cell_to_vertex_map[c1];
-            int v2 = d_cell_to_vertex_map[c2];
-            int v3 = d_cell_to_vertex_map[c3];
+            int v0 = sparse_select_cell_vertex(c0, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v1 = sparse_select_cell_vertex(c1, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v2 = sparse_select_cell_vertex(c2, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v3 = sparse_select_cell_vertex(c3, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
             if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
                 float3 pa = d_vertices[v0];
                 float3 pb = d_vertices[v1];
@@ -726,7 +1035,6 @@ __global__ void emit_sparse_faces_kernel(
                 if (sparse_dot(quad_n, quad_n) < 1e-12f) {
                     quad_n = sparse_cross(sparse_operator_minus(pc, pa), sparse_operator_minus(pd, pa));
                 }
-                float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix, iy + 1, iz, params));
                 if (sparse_dot(g_n, g_n) > 0.0f && sparse_dot(quad_n, quad_n) > 0.0f) {
                     if (sparse_dot(quad_n, g_n) < 0.0f) {
                         int tmp = v1; v1 = v3; v3 = tmp;
@@ -744,6 +1052,8 @@ __global__ void emit_sparse_faces_kernel(
                     d_faces[4 * out_idx + 3] = v1;
                     out_idx++;
                 }
+            } else if (params.multi_vertex_cells) {
+                atomicAdd(&d_counters->faces_skipped, 1);
             }
         }
     }
@@ -754,14 +1064,15 @@ __global__ void emit_sparse_faces_kernel(
         bool is_crossing = (d_sdf[g0] * d_sdf[g1] < 0.0f);
         bool is_thin = (!is_crossing && sparse_is_thin_edge(d_sdf[g0], d_sdf[g1], ix, iy, iz, ix, iy, iz + 1, d_sdf, params));
         if (is_crossing || is_thin) {
+            float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix, iy, iz + 1, params));
             int c0 = sparse_cell_index(ix - 1, iy - 1, iz, params.nx, params.ny, params.nz);
             int c1 = sparse_cell_index(ix, iy - 1, iz, params.nx, params.ny, params.nz);
             int c2 = sparse_cell_index(ix, iy, iz, params.nx, params.ny, params.nz);
             int c3 = sparse_cell_index(ix - 1, iy, iz, params.nx, params.ny, params.nz);
-            int v0 = d_cell_to_vertex_map[c0];
-            int v1 = d_cell_to_vertex_map[c1];
-            int v2 = d_cell_to_vertex_map[c2];
-            int v3 = d_cell_to_vertex_map[c3];
+            int v0 = sparse_select_cell_vertex(c0, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v1 = sparse_select_cell_vertex(c1, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v2 = sparse_select_cell_vertex(c2, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
+            int v3 = sparse_select_cell_vertex(c3, d_cell_to_vertex_map, d_cell_vertex_counts_map, d_vertex_normals, g_n, params.multi_vertex_cells);
             if (v0 >= 0 && v1 >= 0 && v2 >= 0 && v3 >= 0) {
                 float3 pa = d_vertices[v0];
                 float3 pb = d_vertices[v1];
@@ -771,7 +1082,6 @@ __global__ void emit_sparse_faces_kernel(
                 if (sparse_dot(quad_n, quad_n) < 1e-12f) {
                     quad_n = sparse_cross(sparse_operator_minus(pc, pa), sparse_operator_minus(pd, pa));
                 }
-                float3 g_n = sparse_operator_plus(sparse_get_gradient(d_sdf, ix, iy, iz, params), sparse_get_gradient(d_sdf, ix, iy, iz + 1, params));
                 if (sparse_dot(g_n, g_n) > 0.0f && sparse_dot(quad_n, quad_n) > 0.0f) {
                     if (sparse_dot(quad_n, g_n) < 0.0f) {
                         int tmp = v1; v1 = v3; v3 = tmp;
@@ -781,6 +1091,7 @@ __global__ void emit_sparse_faces_kernel(
                 d_faces[4 * out_idx + 1] = v1;
                 d_faces[4 * out_idx + 2] = v2;
                 d_faces[4 * out_idx + 3] = v3;
+                out_idx++;
                 if (is_thin) {
                     d_faces[4 * out_idx + 0] = v0;
                     d_faces[4 * out_idx + 1] = v3;
@@ -788,6 +1099,8 @@ __global__ void emit_sparse_faces_kernel(
                     d_faces[4 * out_idx + 3] = v1;
                     out_idx++;
                 }
+            } else if (params.multi_vertex_cells) {
+                atomicAdd(&d_counters->faces_skipped, 1);
             }
         }
     }
@@ -901,6 +1214,7 @@ DualContouringMesh CudaSparseDualContouringBackend::extract_device(const DenseSd
     params.oy = grid.oy;
     params.oz = grid.oz;
     params.normal_mode = normal_mode;
+    params.multi_vertex_cells = multi_vertex_cells;
 
     float* d_sdf = (float*)grid.d_values;
     uint8_t* d_active_brick_flags = nullptr;
@@ -981,24 +1295,63 @@ DualContouringMesh CudaSparseDualContouringBackend::extract_device(const DenseSd
     int total_faces = 0;
 
     if (active_cell_count > 0) {
-        CUDA_CHECK_SPARSE(cudaMalloc(&d_vertices, active_cell_count * sizeof(float3)));
-
         int grid_size_active = (active_cell_count + block_size - 1) / block_size;
+        int total_vertices = active_cell_count;
 
-        CUDA_CHECK_SPARSE(cudaEventRecord(event_start));
-        compute_vertices_sparse_kernel<<<grid_size_active, block_size>>>(
-            d_active_cell_indices,
-            d_sdf,
-            nullptr,
-            d_vertices,
-            d_cell_to_vertex_map,
-            active_cell_count,
-            params,
-            d_counters
-        );
-        CUDA_CHECK_SPARSE(cudaEventRecord(event_stop));
-        CUDA_CHECK_SPARSE(cudaEventSynchronize(event_stop));
-        CUDA_CHECK_SPARSE(cudaEventElapsedTime(&qef_ms, event_start, event_stop));
+        int* d_active_cell_vertex_counts = nullptr;
+        int* d_scanned_vertex_counts = nullptr;
+        int* d_cell_vertex_counts_map = nullptr;
+        float3* d_vertex_normals = nullptr;
+
+        if (params.multi_vertex_cells) {
+            CUDA_CHECK_SPARSE(cudaMalloc(&d_active_cell_vertex_counts, active_cell_count * sizeof(int)));
+            CUDA_CHECK_SPARSE(cudaMalloc(&d_scanned_vertex_counts, active_cell_count * sizeof(int)));
+            CUDA_CHECK_SPARSE(cudaMalloc(&d_cell_vertex_counts_map, total_cells * sizeof(int)));
+            CUDA_CHECK_SPARSE(cudaMemset(d_cell_vertex_counts_map, 0, total_cells * sizeof(int)));
+
+            count_cell_vertices_sparse_kernel<<<grid_size_active, block_size>>>(
+                d_active_cell_indices,
+                d_sdf,
+                nullptr,
+                d_active_cell_vertex_counts,
+                active_cell_count,
+                params,
+                d_counters
+            );
+            thrust::exclusive_scan(thrust::device, d_active_cell_vertex_counts, d_active_cell_vertex_counts + active_cell_count, d_scanned_vertex_counts);
+
+            int last_v_count = 0;
+            int last_v_scanned = 0;
+            CUDA_CHECK_SPARSE(cudaMemcpy(&last_v_count, d_active_cell_vertex_counts + active_cell_count - 1, sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK_SPARSE(cudaMemcpy(&last_v_scanned, d_scanned_vertex_counts + active_cell_count - 1, sizeof(int), cudaMemcpyDeviceToHost));
+            total_vertices = last_v_scanned + last_v_count;
+        }
+
+        CUDA_CHECK_SPARSE(cudaMalloc(&d_vertices, total_vertices * sizeof(float3)));
+        if (params.multi_vertex_cells && total_vertices > 0) {
+            CUDA_CHECK_SPARSE(cudaMalloc(&d_vertex_normals, total_vertices * sizeof(float3)));
+        }
+
+        if (total_vertices > 0) {
+            CUDA_CHECK_SPARSE(cudaEventRecord(event_start));
+            compute_vertices_sparse_kernel<<<grid_size_active, block_size>>>(
+                d_active_cell_indices,
+                d_sdf,
+                nullptr,
+                d_vertices,
+                d_vertex_normals,
+                d_cell_to_vertex_map,
+                d_cell_vertex_counts_map,
+                d_scanned_vertex_counts,
+                d_active_cell_vertex_counts,
+                active_cell_count,
+                params,
+                d_counters
+            );
+            CUDA_CHECK_SPARSE(cudaEventRecord(event_stop));
+            CUDA_CHECK_SPARSE(cudaEventSynchronize(event_stop));
+            CUDA_CHECK_SPARSE(cudaEventElapsedTime(&qef_ms, event_start, event_stop));
+        }
 
         int* d_active_cell_face_counts = nullptr;
         int* d_scanned_face_counts = nullptr;
@@ -1012,6 +1365,8 @@ DualContouringMesh CudaSparseDualContouringBackend::extract_device(const DenseSd
             d_active_cell_indices,
             d_sdf,
             d_cell_to_vertex_map,
+            d_cell_vertex_counts_map,
+            d_vertex_normals,
             d_active_cell_face_counts,
             active_cell_count,
             params
@@ -1033,18 +1388,21 @@ DualContouringMesh CudaSparseDualContouringBackend::extract_device(const DenseSd
         total_faces = last_scanned + last_count;
 
         CUDA_CHECK_SPARSE(cudaEventRecord(event_start));
-        if (total_faces > 0) {
+        if (total_faces > 0 && total_vertices > 0) {
             CUDA_CHECK_SPARSE(cudaMalloc(&d_faces, total_faces * 4 * sizeof(int)));
             emit_sparse_faces_kernel<<<grid_size_active, block_size>>>(
                 d_active_cell_indices,
                 d_sdf,
                 d_cell_to_vertex_map,
+                d_cell_vertex_counts_map,
                 d_vertices,
+                d_vertex_normals,
                 d_active_cell_face_counts,
                 d_scanned_face_counts,
                 d_faces,
                 active_cell_count,
-                params
+                params,
+                d_counters
             );
         }
         CUDA_CHECK_SPARSE(cudaEventRecord(event_stop));
@@ -1052,10 +1410,12 @@ DualContouringMesh CudaSparseDualContouringBackend::extract_device(const DenseSd
         CUDA_CHECK_SPARSE(cudaEventElapsedTime(&face_fill_ms, event_start, event_stop));
 
         CUDA_CHECK_SPARSE(cudaEventRecord(event_start));
-        mesh.vertices.resize(active_cell_count * 3);
-        CUDA_CHECK_SPARSE(cudaMemcpy(mesh.vertices.data(), d_vertices, active_cell_count * sizeof(float3), cudaMemcpyDeviceToHost));
+        mesh.vertices.resize(total_vertices * 3);
+        if (total_vertices > 0) {
+            CUDA_CHECK_SPARSE(cudaMemcpy(mesh.vertices.data(), d_vertices, total_vertices * sizeof(float3), cudaMemcpyDeviceToHost));
+        }
 
-        if (total_faces > 0) {
+        if (total_faces > 0 && total_vertices > 0) {
             mesh.faces.resize(total_faces * 4);
             CUDA_CHECK_SPARSE(cudaMemcpy(mesh.faces.data(), d_faces, total_faces * 4 * sizeof(int), cudaMemcpyDeviceToHost));
         }
@@ -1066,7 +1426,11 @@ DualContouringMesh CudaSparseDualContouringBackend::extract_device(const DenseSd
         if (d_faces) CUDA_CHECK_SPARSE(cudaFree(d_faces));
         CUDA_CHECK_SPARSE(cudaFree(d_active_cell_face_counts));
         CUDA_CHECK_SPARSE(cudaFree(d_scanned_face_counts));
-        CUDA_CHECK_SPARSE(cudaFree(d_vertices));
+        if (d_vertices) CUDA_CHECK_SPARSE(cudaFree(d_vertices));
+        if (d_vertex_normals) CUDA_CHECK_SPARSE(cudaFree(d_vertex_normals));
+        if (d_active_cell_vertex_counts) CUDA_CHECK_SPARSE(cudaFree(d_active_cell_vertex_counts));
+        if (d_scanned_vertex_counts) CUDA_CHECK_SPARSE(cudaFree(d_scanned_vertex_counts));
+        if (d_cell_vertex_counts_map) CUDA_CHECK_SPARSE(cudaFree(d_cell_vertex_counts_map));
     }
 
     SparseDeviceCounters host_counters;
@@ -1087,7 +1451,7 @@ DualContouringMesh CudaSparseDualContouringBackend::extract_device(const DenseSd
     auto time_end_all = std::chrono::high_resolution_clock::now();
     float total_ms = std::chrono::duration<float, std::milli>(time_end_all - time_start_all).count();
 
-    stats.backend = "cuda-sparse";
+    stats.backend = params.multi_vertex_cells ? "cuda-sparse-mvdc" : "cuda-sparse";
     stats.nx = grid.nx;
     stats.ny = grid.ny;
     stats.nz = grid.nz;
@@ -1109,11 +1473,18 @@ DualContouringMesh CudaSparseDualContouringBackend::extract_device(const DenseSd
     stats.face_emission_ms = face_count_ms + face_prefix_sum_ms + face_fill_ms;
     stats.download_ms = download_ms;
     stats.total_ms = total_ms;
-    stats.vertex_count = active_cell_count;
+    stats.vertex_count = mesh.vertices.size() / 3;
     stats.face_count = mesh.faces.size() / 4;
     stats.qef_fallback_count = host_counters.qef_fallbacks;
     stats.clamp_count = host_counters.out_of_cell_clamps;
     stats.invalid_count = host_counters.invalid_count;
+    stats.ambiguous_cells = host_counters.ambiguous_cells;
+    stats.multi_vertex_cells = host_counters.multi_vertex_cells;
+    stats.one_vertex_cells = host_counters.one_vertex_cells;
+    stats.two_vertex_cells = host_counters.two_vertex_cells;
+    stats.split_rejection_count = host_counters.split_rejections;
+    stats.bad_qef_count = host_counters.bad_qef_count;
+    stats.faces_skipped_due_to_missing_cluster = host_counters.faces_skipped;
 
     return mesh;
 }

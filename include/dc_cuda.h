@@ -39,13 +39,24 @@ public:
     int brick_size;
     NormalComputationMode normal_mode;
     int chunk_size;
+    bool multi_vertex_cells;
 
     CudaSparseDualContouringBackend(
         int b_size = 8,
         NormalComputationMode n_mode = NormalComputationMode::FiniteDifference,
-        int c_size = 0
-    ) : brick_size(b_size), normal_mode(n_mode), chunk_size(c_size) {}
+        int c_size = 0,
+        bool mv_cells = false
+    ) : brick_size(b_size), normal_mode(n_mode), chunk_size(c_size), multi_vertex_cells(mv_cells) {}
 
     DualContouringMesh extract(const DenseSdfGrid& grid, DualContouringStats& stats) override;
     DualContouringMesh extract_device(const DenseSdfGridDevice& grid, DualContouringStats& stats);
+};
+
+class CudaSparseMvdcDualContouringBackend : public CudaSparseDualContouringBackend {
+public:
+    CudaSparseMvdcDualContouringBackend(
+        int b_size = 8,
+        NormalComputationMode n_mode = NormalComputationMode::FiniteDifference,
+        int c_size = 0
+    ) : CudaSparseDualContouringBackend(b_size, n_mode, c_size, true) {}
 };

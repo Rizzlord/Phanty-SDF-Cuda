@@ -280,6 +280,11 @@ startBtn.addEventListener('click', async () => {
             } else {
                 document.getElementById('stat-bricks').textContent = 'N/A (Dense Backend)';
             }
+            if (data.stats.ambiguous_cells && data.stats.ambiguous_cells > 0) {
+                document.getElementById('stat-mvdc').textContent = `${data.stats.ambiguous_cells.toLocaleString()} split (${data.stats.split_rejection_count || 0} rejected)`;
+            } else {
+                document.getElementById('stat-mvdc').textContent = '0 (Single-Vertex or Standard)';
+            }
             document.getElementById('stat-upload').textContent = `${data.stats.upload_ms} ms`;
             document.getElementById('stat-marking').textContent = `${data.stats.marking_ms} ms`;
             document.getElementById('stat-compaction').textContent = `${data.stats.compaction_ms} ms`;
