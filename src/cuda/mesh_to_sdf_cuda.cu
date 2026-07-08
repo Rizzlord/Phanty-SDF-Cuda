@@ -501,6 +501,31 @@ __global__ void rasterize_triangles_to_voxels_kernel(
     }
 }
 
+__global__ void dilate_voxel_shell_kernel(int vres, const uint8_t* d_in, uint8_t* d_out, int r) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
+    if (idx >= total) return;
+    if (d_in[idx] == 2) {
+        d_out[idx] = 2;
+        return;
+    }
+    int ix = idx % vres;
+    int iy = (idx / vres) % vres;
+    int iz = idx / ((size_t)vres * vres);
+
+    for (int dz = max(0, iz - r); dz <= min(vres - 1, iz + r); ++dz) {
+        for (int dy = max(0, iy - r); dy <= min(vres - 1, iy + r); ++dy) {
+            for (int dx = max(0, ix - r); dx <= min(vres - 1, ix + r); ++dx) {
+                if (d_in[dx + (size_t)vres * (dy + (size_t)vres * dz)] == 2) {
+                    d_out[idx] = 2;
+                    return;
+                }
+            }
+        }
+    }
+    d_out[idx] = d_in[idx];
+}
+
 __global__ void flood_fill_voxel_exterior_kernel(int vres, uint8_t* d_voxels, uint8_t* d_ext, int* d_changed) {
     size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     size_t total = (size_t)vres * vres * vres;
@@ -726,6 +751,10 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
         CUDA_CHECK_SDF(cudaGetLastError());
 
         int blocks_vox = (total_vox + threads - 1) / threads;
+        dilate_voxel_shell_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext, 3);
+        CUDA_CHECK_SDF(cudaGetLastError());
+        CUDA_CHECK_SDF(cudaMemcpy(d_voxels, d_ext, (size_t)total_vox * sizeof(uint8_t), cudaMemcpyDeviceToDevice));
+
         init_voxel_exterior_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext);
         CUDA_CHECK_SDF(cudaGetLastError());
 
