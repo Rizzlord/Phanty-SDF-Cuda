@@ -656,6 +656,10 @@ __global__ void apply_solid_voxel_sign_mask_kernel(
     int total_voxels = nx * ny * nz;
     if (idx >= total_voxels) return;
 
+    if (d_values[idx] != 3.402823466e+38f) {
+        return;
+    }
+
     int ix = idx % nx;
     int iy = (idx / nx) % ny;
     int iz = idx / (nx * ny);
@@ -667,11 +671,10 @@ __global__ void apply_solid_voxel_sign_mask_kernel(
     int vbz = max(0, min(vres - 1, (int)floorf((p.z - oz) / vox_vz)));
     size_t v_idx = vbx + (size_t)vres * (vby + (size_t)vres * vbz);
 
-    float val = fabsf(d_values[idx]);
     if (d_voxels[v_idx] == 1) {
-        d_values[idx] = -val;
+        d_values[idx] = -10.0f;
     } else {
-        d_values[idx] = val;
+        d_values[idx] = 10.0f;
     }
 }
 
@@ -779,7 +782,7 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
         CUDA_CHECK_SDF(cudaGetLastError());
 
         int blocks_vox = (total_vox + threads - 1) / threads;
-        dilate_voxel_shell_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext, 3);
+        dilate_voxel_shell_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext, 1);
         CUDA_CHECK_SDF(cudaGetLastError());
         CUDA_CHECK_SDF(cudaMemcpy(d_voxels, d_ext, (size_t)total_vox * sizeof(uint8_t), cudaMemcpyDeviceToDevice));
 
