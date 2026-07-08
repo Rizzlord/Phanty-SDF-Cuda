@@ -129,13 +129,100 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
         return mesh;
     }
 
-    int num_vertices = (int)(mesh.vertices.size() / 3);
-    int num_faces = (int)(mesh.faces.size() / 4);
+    int raw_num_vertices = (int)(mesh.vertices.size() / 3);
+    int raw_num_faces = (int)(mesh.faces.size() / 4);
+
+    // 1) Vertex Welding (Merge exact duplicate and epsilon-close vertices across grid boundaries)
+    float min_x = mesh.vertices[0], max_x = mesh.vertices[0];
+    float min_y = mesh.vertices[1], max_y = mesh.vertices[1];
+    float min_z = mesh.vertices[2], max_z = mesh.vertices[2];
+    for (int i = 0; i < raw_num_vertices; ++i) {
+        float x = mesh.vertices[3 * i + 0];
+        float y = mesh.vertices[3 * i + 1];
+        float z = mesh.vertices[3 * i + 2];
+        if (x < min_x) min_x = x; if (x > max_x) max_x = x;
+        if (y < min_y) min_y = y; if (y > max_y) max_y = y;
+        if (z < min_z) min_z = z; if (z > max_z) max_z = z;
+    }
+    float diag = std::sqrt((max_x - min_x) * (max_x - min_x) +
+                           (max_y - min_y) * (max_y - min_y) +
+                           (max_z - min_z) * (max_z - min_z));
+    float eps = (diag > 0.0f) ? (diag * 1e-5f) : 1e-5f;
+    float inv_eps = 1.0f / eps;
+
+    struct QuantizedCoord {
+        int64_t qx, qy, qz;
+        bool operator==(const QuantizedCoord& o) const {
+            return qx == o.qx && qy == o.qy && qz == o.qz;
+        }
+    };
+    struct QuantizedHasher {
+        size_t operator()(const QuantizedCoord& k) const {
+            return ((size_t)k.qx * 73856093u) ^ ((size_t)k.qy * 19349663u) ^ ((size_t)k.qz * 83492791u);
+        }
+    };
+
+    std::unordered_map<QuantizedCoord, int, QuantizedHasher> coord_map;
+    coord_map.reserve(raw_num_vertices);
+    std::vector<int> remap(raw_num_vertices);
+    std::vector<float> welded_vertices;
+    welded_vertices.reserve(mesh.vertices.size());
+
+    for (int i = 0; i < raw_num_vertices; ++i) {
+        float x = mesh.vertices[3 * i + 0];
+        float y = mesh.vertices[3 * i + 1];
+        float z = mesh.vertices[3 * i + 2];
+        QuantizedCoord q{ (int64_t)std::round(x * inv_eps),
+                          (int64_t)std::round(y * inv_eps),
+                          (int64_t)std::round(z * inv_eps) };
+        auto it = coord_map.find(q);
+        if (it != coord_map.end()) {
+            remap[i] = it->second;
+        } else {
+            int new_idx = (int)(welded_vertices.size() / 3);
+            coord_map[q] = new_idx;
+            remap[i] = new_idx;
+            welded_vertices.push_back(x);
+            welded_vertices.push_back(y);
+            welded_vertices.push_back(z);
+        }
+    }
+
+    int num_vertices = (int)(welded_vertices.size() / 3);
+
+    std::vector<int> welded_faces;
+    welded_faces.reserve(mesh.faces.size());
+    for (int f = 0; f < raw_num_faces; ++f) {
+        int i0 = remap[mesh.faces[4 * f + 0]];
+        int i1 = remap[mesh.faces[4 * f + 1]];
+        int i2 = remap[mesh.faces[4 * f + 2]];
+        int i3 = remap[mesh.faces[4 * f + 3]];
+        if (i0 == i1 || i1 == i2 || i2 == i3 || i3 == i0 || i0 == i2 || i1 == i3) {
+            int unique_arr[4];
+            int ucount = 0;
+            int v_indices[4] = {i0, i1, i2, i3};
+            for (int k = 0; k < 4; ++k) {
+                bool found = false;
+                for (int m = 0; m < ucount; ++m) {
+                    if (unique_arr[m] == v_indices[k]) { found = true; break; }
+                }
+                if (!found) unique_arr[ucount++] = v_indices[k];
+            }
+            if (ucount < 3) continue;
+        }
+        welded_faces.push_back(i0);
+        welded_faces.push_back(i1);
+        welded_faces.push_back(i2);
+        welded_faces.push_back(i3);
+    }
+
+    int num_faces = (int)(welded_faces.size() / 4);
+    if (num_faces == 0) return mesh;
 
     struct UndirectedEdge {
         int u, v; // u < v
         int face_idx;
-        int edge_idx; // 0, 1, 2, or 3
+        int edge_idx;
         bool operator<(const UndirectedEdge& o) const {
             if (u != o.u) return u < o.u;
             return v < o.v;
@@ -146,8 +233,8 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
     all_edges.reserve(num_faces * 4);
     for (int f = 0; f < num_faces; ++f) {
         for (int e = 0; e < 4; ++e) {
-            int u = mesh.faces[4 * f + e];
-            int v = mesh.faces[4 * f + (e + 1) % 4];
+            int u = welded_faces[4 * f + e];
+            int v = welded_faces[4 * f + (e + 1) % 4];
             if (u == v) continue;
             UndirectedEdge edge;
             edge.u = std::min(u, v);
@@ -180,16 +267,32 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
         if (count == 1) {
             int f = all_edges[i].face_idx;
             int e = all_edges[i].edge_idx;
-            int u = mesh.faces[4 * f + e];
-            int v = mesh.faces[4 * f + (e + 1) % 4];
-            boundary_edges.push_back({u, v, f});
+            int u = welded_faces[4 * f + e];
+            int v = welded_faces[4 * f + (e + 1) % 4];
+            if (u != v) boundary_edges.push_back({u, v, f});
+        } else if (count == 2) {
+            int f1 = all_edges[i].face_idx;
+            int f2 = all_edges[i + 1].face_idx;
+            if (neighbor_counts[f1] < 4) face_neighbors[4 * f1 + neighbor_counts[f1]++] = f2;
+            if (neighbor_counts[f2] < 4) face_neighbors[4 * f2 + neighbor_counts[f2]++] = f1;
         } else {
-            for (size_t x = i; x < j; ++x) {
-                for (size_t y = x + 1; y < j; ++y) {
-                    int f1 = all_edges[x].face_idx;
-                    int f2 = all_edges[y].face_idx;
-                    if (neighbor_counts[f1] < 4) face_neighbors[4 * f1 + neighbor_counts[f1]++] = f2;
-                    if (neighbor_counts[f2] < 4) face_neighbors[4 * f2 + neighbor_counts[f2]++] = f1;
+            if (!remove_floaters) {
+                for (size_t x = i; x < j; ++x) {
+                    for (size_t y = x + 1; y < j; ++y) {
+                        int f1 = all_edges[x].face_idx;
+                        int f2 = all_edges[y].face_idx;
+                        if (neighbor_counts[f1] < 4) face_neighbors[4 * f1 + neighbor_counts[f1]++] = f2;
+                        if (neighbor_counts[f2] < 4) face_neighbors[4 * f2 + neighbor_counts[f2]++] = f1;
+                    }
+                }
+            }
+            if (close_holes && remove_floaters) {
+                for (size_t x = i; x < j; ++x) {
+                    int f = all_edges[x].face_idx;
+                    int e = all_edges[x].edge_idx;
+                    int u = welded_faces[4 * f + e];
+                    int v = welded_faces[4 * f + (e + 1) % 4];
+                    if (u != v) boundary_edges.push_back({u, v, f});
                 }
             }
         }
@@ -259,7 +362,7 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
     active_faces.reserve(kept_faces.size() * 4);
     for (int f : kept_faces) {
         for (int k = 0; k < 4; ++k) {
-            active_faces.push_back(mesh.faces[4 * f + k]);
+            active_faces.push_back(welded_faces[4 * f + k]);
         }
     }
 
@@ -294,7 +397,7 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
                     if (it != loop.end()) {
                         std::vector<int> sub_loop(it, loop.end());
                         loop.erase(it, loop.end());
-                        if (sub_loop.size() >= 3 && sub_loop.size() <= 64) {
+                        if (sub_loop.size() >= 3 && sub_loop.size() <= 1024) {
                             std::vector<int> rev_loop(sub_loop.rbegin(), sub_loop.rend());
                             if (rev_loop.size() == 3) {
                                 active_faces.push_back(rev_loop[2]);
@@ -307,8 +410,9 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
                                 active_faces.push_back(rev_loop[1]);
                                 active_faces.push_back(rev_loop[0]);
                             } else {
+                                int v0 = rev_loop[0];
                                 for (size_t idx = 1; idx < rev_loop.size() - 1; ++idx) {
-                                    active_faces.push_back(rev_loop[0]);
+                                    active_faces.push_back(v0);
                                     active_faces.push_back(rev_loop[idx]);
                                     active_faces.push_back(rev_loop[idx + 1]);
                                     active_faces.push_back(rev_loop[idx + 1]);
@@ -324,7 +428,7 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
                     curr = next;
                 }
 
-                if (closed && loop.size() >= 3 && loop.size() <= 64) {
+                if (closed && loop.size() >= 3 && loop.size() <= 1024) {
                     std::vector<int> rev_loop(loop.rbegin(), loop.rend());
                     if (rev_loop.size() == 3) {
                         active_faces.push_back(rev_loop[2]);
@@ -337,8 +441,9 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
                         active_faces.push_back(rev_loop[1]);
                         active_faces.push_back(rev_loop[0]);
                     } else {
+                        int v0 = rev_loop[0];
                         for (size_t idx = 1; idx < rev_loop.size() - 1; ++idx) {
-                            active_faces.push_back(rev_loop[0]);
+                            active_faces.push_back(v0);
                             active_faces.push_back(rev_loop[idx]);
                             active_faces.push_back(rev_loop[idx + 1]);
                             active_faces.push_back(rev_loop[idx + 1]);
@@ -351,19 +456,20 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
 
     std::vector<int> old_to_new_vertex(num_vertices, -1);
     DualContouringMesh processed_mesh;
-    processed_mesh.vertices.reserve(mesh.vertices.size());
+    processed_mesh.vertices.reserve(welded_vertices.size());
     processed_mesh.faces.reserve(active_faces.size());
 
     for (int old_v : active_faces) {
         if (old_to_new_vertex[old_v] == -1) {
             old_to_new_vertex[old_v] = (int)(processed_mesh.vertices.size() / 3);
-            processed_mesh.vertices.push_back(mesh.vertices[3 * old_v + 0]);
-            processed_mesh.vertices.push_back(mesh.vertices[3 * old_v + 1]);
-            processed_mesh.vertices.push_back(mesh.vertices[3 * old_v + 2]);
+            processed_mesh.vertices.push_back(welded_vertices[3 * old_v + 0]);
+            processed_mesh.vertices.push_back(welded_vertices[3 * old_v + 1]);
+            processed_mesh.vertices.push_back(welded_vertices[3 * old_v + 2]);
         }
         processed_mesh.faces.push_back(old_to_new_vertex[old_v]);
     }
 
     return processed_mesh;
 }
+
 
