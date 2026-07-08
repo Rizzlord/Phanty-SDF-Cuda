@@ -11,6 +11,7 @@
 
 #ifdef DC_ENABLE_CUDA
 #include "dc_cuda.h"
+#include "mesh_to_sdf.h"
 #endif
 
 void write_obj(const std::string& filepath, const DualContouringMesh& mesh) {
@@ -116,10 +117,94 @@ void generate_plane(DenseSdfGrid& grid, int res) {
     }
 }
 
-int main(int argc, char** argv) {
+#ifdef DC_ENABLE_CUDA
+static bool read_obj_to_sdf(const std::string& filepath, int res, DenseSdfGrid& grid) {
+    std::ifstream in(filepath);
+    if (!in) return false;
+
+    std::vector<float> vertices;
+    std::vector<int> faces;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        if (line.size() >= 2 && line[0] == 'v' && line[1] == ' ') {
+            float x, y, z;
+            if (sscanf(line.c_str(), "v %f %f %f", &x, &y, &z) == 3) {
+                vertices.push_back(x);
+                vertices.push_back(y);
+                vertices.push_back(z);
+            }
+        } else if (line.size() >= 2 && line[0] == 'f' && line[1] == ' ') {
+            std::vector<int> face_indices;
+            char* ptr = (char*)line.c_str() + 2;
+            while (*ptr) {
+                while (*ptr == ' ' || *ptr == '\t') ptr++;
+                if (!*ptr) break;
+                int idx = atoi(ptr);
+                if (idx != 0) {
+                    if (idx < 0) idx = (int)(vertices.size() / 3) + idx + 1;
+                    face_indices.push_back(idx - 1);
+                }
+                while (*ptr && *ptr != ' ' && *ptr != '\t') ptr++;
+            }
+            if (face_indices.size() >= 3) {
+                for (size_t k = 1; k + 1 < face_indices.size(); ++k) {
+                    faces.push_back(face_indices[0]);
+                    faces.push_back(face_indices[k]);
+                    faces.push_back(face_indices[k + 1]);
+                }
+            }
+        }
+    }
+
+    if (vertices.empty() || faces.empty()) return false;
+
+    float min_x = vertices[0], max_x = vertices[0];
+    float min_y = vertices[1], max_y = vertices[1];
+    float min_z = vertices[2], max_z = vertices[2];
+    for (size_t i = 0; i < vertices.size() / 3; ++i) {
+        float x = vertices[3 * i + 0];
+        float y = vertices[3 * i + 1];
+        float z = vertices[3 * i + 2];
+        if (x < min_x) min_x = x; if (x > max_x) max_x = x;
+        if (y < min_y) min_y = y; if (y > max_y) max_y = y;
+        if (z < min_z) min_z = z; if (z > max_z) max_z = z;
+    }
+
+    float diag = std::sqrt((max_x - min_x)*(max_x - min_x) + (max_y - min_y)*(max_y - min_y) + (max_z - min_z)*(max_z - min_z));
+    float pad = (diag > 0.0f) ? (diag * 0.08f) : 0.1f;
+    min_x -= pad; max_x += pad;
+    min_y -= pad; max_y += pad;
+    min_z -= pad; max_z += pad;
+
+    grid.nx = res;
+    grid.ny = res;
+    grid.nz = res;
+    grid.ox = min_x;
+    grid.oy = min_y;
+    grid.oz = min_z;
+    grid.vx = (max_x - min_x) / (res - 1);
+    grid.vy = (max_y - min_y) / (res - 1);
+    grid.vz = (max_z - min_z) / (res - 1);
+
+    int num_vertices = (int)(vertices.size() / 3);
+    int num_faces = (int)(faces.size() / 3);
+    DenseSdfGrid computed = compute_mesh_sdf_cuda(
+        vertices.data(), num_vertices,
+        faces.data(), num_faces,
+        res, res, res,
+        grid.ox, grid.oy, grid.oz,
+        grid.vx, grid.vy, grid.vz
+    );
+    grid = std::move(computed);
+    return true;
+}
+#endif
+
+int main(int argc, char* argv[]) {
     std::string input_file = "";
     std::string output_file = "";
-    std::string backend_type = "cpu";
+    std::string backend_type = "cuda-sparse-mvdc";
     std::string gen_type = "";
     std::string normal_mode_str = "finite-difference";
     bool benchmark = false;
@@ -131,30 +216,24 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--backend") {
-            if (i + 1 < argc) {
-                backend_type = argv[++i];
-            }
+        if (arg == "-i" || arg == "--input") {
+            if (i + 1 < argc) input_file = argv[++i];
+        } else if (arg == "-o" || arg == "--output") {
+            if (i + 1 < argc) output_file = argv[++i];
+        } else if (arg == "-b" || arg == "--backend") {
+            if (i + 1 < argc) backend_type = argv[++i];
+        } else if (arg == "-g" || arg == "--res") {
+            if (i + 1 < argc) res = std::stoi(argv[++i]);
+        } else if (arg == "-oi" || arg == "-ii" || arg == "-dc" || arg == "-mu" || arg == "-hu") {
+            if (i + 1 < argc) i++; // ignore old options safely
         } else if (arg == "--generate") {
-            if (i + 1 < argc) {
-                gen_type = argv[++i];
-            }
-        } else if (arg == "--res") {
-            if (i + 1 < argc) {
-                res = std::stoi(argv[++i]);
-            }
+            if (i + 1 < argc) gen_type = argv[++i];
         } else if (arg == "--brick-size") {
-            if (i + 1 < argc) {
-                brick_size = std::stoi(argv[++i]);
-            }
+            if (i + 1 < argc) brick_size = std::stoi(argv[++i]);
         } else if (arg == "--chunk-size") {
-            if (i + 1 < argc) {
-                chunk_size = std::stoi(argv[++i]);
-            }
+            if (i + 1 < argc) chunk_size = std::stoi(argv[++i]);
         } else if (arg == "--normal-mode") {
-            if (i + 1 < argc) {
-                normal_mode_str = argv[++i];
-            }
+            if (i + 1 < argc) normal_mode_str = argv[++i];
         } else if (arg == "--benchmark") {
             benchmark = true;
         } else if (arg == "--close-holes") {
@@ -176,8 +255,8 @@ int main(int argc, char** argv) {
     }
 
     if (output_file.empty()) {
-        std::cerr << "Usage: " << argv[0] << " <input.sdf> <output.obj> [options]\n";
-        std::cerr << "Or:    " << argv[0] << " --generate <sphere|box|plane> <output.obj> [options]\n";
+        std::cerr << "Usage: " << argv[0] << " -i <input.obj|.sdf> -o <output.obj> [options]\n";
+        std::cerr << "Options: -b/--backend <cuda-sparse-mvdc|cuda-sparse|cuda|cpu>, -g/--res <int>, --close-holes, --remove-floaters\n";
         return 1;
     }
 
@@ -194,9 +273,25 @@ int main(int argc, char** argv) {
             return 1;
         }
     } else {
-        if (!read_sdf(input_file, grid)) {
-            std::cerr << "Failed to read SDF from: " << input_file << "\n";
+        bool is_obj = (input_file.size() >= 4 && (
+            input_file.substr(input_file.size() - 4) == ".obj" ||
+            input_file.substr(input_file.size() - 4) == ".OBJ"));
+
+        if (is_obj) {
+#ifdef DC_ENABLE_CUDA
+            if (!read_obj_to_sdf(input_file, res, grid)) {
+                std::cerr << "Failed to convert OBJ to SDF from: " << input_file << "\n";
+                return 1;
+            }
+#else
+            std::cerr << "Error: OBJ to SDF conversion requires CUDA enabled.\n";
             return 1;
+#endif
+        } else {
+            if (!read_sdf(input_file, grid)) {
+                std::cerr << "Failed to read SDF from: " << input_file << "\n";
+                return 1;
+            }
         }
     }
 
