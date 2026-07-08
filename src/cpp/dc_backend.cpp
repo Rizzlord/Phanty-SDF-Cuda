@@ -124,22 +124,18 @@ DualContouringMesh CpuDualContouringBackend::extract(const DenseSdfGrid& grid, D
     return mesh;
 }
 
-DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_holes, bool remove_floaters) {
-    if (mesh.vertices.empty() || mesh.faces.empty() || (!close_holes && !remove_floaters)) {
-        return mesh;
-    }
+static void merge_vertices_in_place(DualContouringMesh& m, float eps_mult = 1e-5f) {
+    int raw_num_vertices = (int)(m.vertices.size() / 3);
+    int raw_num_faces = (int)(m.faces.size() / 4);
+    if (raw_num_vertices <= 0 || raw_num_faces <= 0) return;
 
-    int raw_num_vertices = (int)(mesh.vertices.size() / 3);
-    int raw_num_faces = (int)(mesh.faces.size() / 4);
-
-    // 1) Vertex Welding (Merge exact duplicate and epsilon-close vertices across grid boundaries)
-    float min_x = mesh.vertices[0], max_x = mesh.vertices[0];
-    float min_y = mesh.vertices[1], max_y = mesh.vertices[1];
-    float min_z = mesh.vertices[2], max_z = mesh.vertices[2];
+    float min_x = m.vertices[0], max_x = m.vertices[0];
+    float min_y = m.vertices[1], max_y = m.vertices[1];
+    float min_z = m.vertices[2], max_z = m.vertices[2];
     for (int i = 0; i < raw_num_vertices; ++i) {
-        float x = mesh.vertices[3 * i + 0];
-        float y = mesh.vertices[3 * i + 1];
-        float z = mesh.vertices[3 * i + 2];
+        float x = m.vertices[3 * i + 0];
+        float y = m.vertices[3 * i + 1];
+        float z = m.vertices[3 * i + 2];
         if (x < min_x) min_x = x; if (x > max_x) max_x = x;
         if (y < min_y) min_y = y; if (y > max_y) max_y = y;
         if (z < min_z) min_z = z; if (z > max_z) max_z = z;
@@ -147,7 +143,7 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
     float diag = std::sqrt((max_x - min_x) * (max_x - min_x) +
                            (max_y - min_y) * (max_y - min_y) +
                            (max_z - min_z) * (max_z - min_z));
-    float eps = (diag > 0.0f) ? (diag * 1e-5f) : 1e-5f;
+    float eps = (diag > 0.0f) ? (diag * eps_mult) : eps_mult;
     float inv_eps = 1.0f / eps;
 
     struct QuantizedCoord {
@@ -166,12 +162,12 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
     coord_map.reserve(raw_num_vertices);
     std::vector<int> remap(raw_num_vertices);
     std::vector<float> welded_vertices;
-    welded_vertices.reserve(mesh.vertices.size());
+    welded_vertices.reserve(m.vertices.size());
 
     for (int i = 0; i < raw_num_vertices; ++i) {
-        float x = mesh.vertices[3 * i + 0];
-        float y = mesh.vertices[3 * i + 1];
-        float z = mesh.vertices[3 * i + 2];
+        float x = m.vertices[3 * i + 0];
+        float y = m.vertices[3 * i + 1];
+        float z = m.vertices[3 * i + 2];
         QuantizedCoord q{ (int64_t)std::round(x * inv_eps),
                           (int64_t)std::round(y * inv_eps),
                           (int64_t)std::round(z * inv_eps) };
@@ -188,23 +184,21 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
         }
     }
 
-    int num_vertices = (int)(welded_vertices.size() / 3);
-
     std::vector<int> welded_faces;
-    welded_faces.reserve(mesh.faces.size());
+    welded_faces.reserve(m.faces.size());
     for (int f = 0; f < raw_num_faces; ++f) {
-        int i0 = remap[mesh.faces[4 * f + 0]];
-        int i1 = remap[mesh.faces[4 * f + 1]];
-        int i2 = remap[mesh.faces[4 * f + 2]];
-        int i3 = remap[mesh.faces[4 * f + 3]];
+        int i0 = remap[m.faces[4 * f + 0]];
+        int i1 = remap[m.faces[4 * f + 1]];
+        int i2 = remap[m.faces[4 * f + 2]];
+        int i3 = remap[m.faces[4 * f + 3]];
         if (i0 == i1 || i1 == i2 || i2 == i3 || i3 == i0 || i0 == i2 || i1 == i3) {
             int unique_arr[4];
             int ucount = 0;
             int v_indices[4] = {i0, i1, i2, i3};
             for (int k = 0; k < 4; ++k) {
                 bool found = false;
-                for (int m = 0; m < ucount; ++m) {
-                    if (unique_arr[m] == v_indices[k]) { found = true; break; }
+                for (int mm = 0; mm < ucount; ++mm) {
+                    if (unique_arr[mm] == v_indices[k]) { found = true; break; }
                 }
                 if (!found) unique_arr[ucount++] = v_indices[k];
             }
@@ -216,8 +210,24 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
         welded_faces.push_back(i3);
     }
 
-    int num_faces = (int)(welded_faces.size() / 4);
-    if (num_faces == 0) return mesh;
+    m.vertices = std::move(welded_vertices);
+    m.faces = std::move(welded_faces);
+}
+
+DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_holes, bool remove_floaters) {
+    if (mesh.vertices.empty() || mesh.faces.empty() || (!close_holes && !remove_floaters)) {
+        return mesh;
+    }
+
+    DualContouringMesh m = mesh;
+    merge_vertices_in_place(m, 1e-5f);
+
+    int num_vertices = (int)(m.vertices.size() / 3);
+    int num_faces = (int)(m.faces.size() / 4);
+    if (num_vertices == 0 || num_faces == 0) return mesh;
+
+    std::vector<float>& welded_vertices = m.vertices;
+    std::vector<int>& welded_faces = m.faces;
 
     struct UndirectedEdge {
         int u, v; // u < v
@@ -374,6 +384,112 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
             }
         }
 
+        auto fill_boundary_loop = [&](const std::vector<int>& rev_loop_in) {
+            if (rev_loop_in.size() < 3) return;
+            std::vector<int> current_loop = rev_loop_in;
+
+            float avg_step = 0.0f;
+            for (size_t k = 0; k < current_loop.size(); ++k) {
+                int idx1 = current_loop[k];
+                int idx2 = current_loop[(k + 1) % current_loop.size()];
+                float dx = welded_vertices[3 * idx2 + 0] - welded_vertices[3 * idx1 + 0];
+                float dy = welded_vertices[3 * idx2 + 1] - welded_vertices[3 * idx1 + 1];
+                float dz = welded_vertices[3 * idx2 + 2] - welded_vertices[3 * idx1 + 2];
+                avg_step += std::sqrt(dx * dx + dy * dy + dz * dz);
+            }
+            if (current_loop.size() > 0) avg_step /= current_loop.size();
+            if (avg_step <= 0.0001f) avg_step = 1.0f;
+
+            while (current_loop.size() > 4) {
+                size_t n = current_loop.size();
+                float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+                for (size_t k = 0; k < n; ++k) {
+                    cx += welded_vertices[3 * current_loop[k] + 0];
+                    cy += welded_vertices[3 * current_loop[k] + 1];
+                    cz += welded_vertices[3 * current_loop[k] + 2];
+                }
+                cx /= n; cy /= n; cz /= n;
+
+                float max_dist = 0.0f;
+                for (size_t k = 0; k < n; ++k) {
+                    float dx = cx - welded_vertices[3 * current_loop[k] + 0];
+                    float dy = cy - welded_vertices[3 * current_loop[k] + 1];
+                    float dz = cz - welded_vertices[3 * current_loop[k] + 2];
+                    float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (dist > max_dist) max_dist = dist;
+                }
+
+                if (max_dist <= 1.25f * avg_step) {
+                    break;
+                }
+
+                std::vector<int> inner_loop;
+                inner_loop.reserve(n);
+                for (size_t k = 0; k < n; ++k) {
+                    float vx = welded_vertices[3 * current_loop[k] + 0];
+                    float vy = welded_vertices[3 * current_loop[k] + 1];
+                    float vz = welded_vertices[3 * current_loop[k] + 2];
+                    float dir_x = cx - vx, dir_y = cy - vy, dir_z = cz - vz;
+                    float dist = std::sqrt(dir_x * dir_x + dir_y * dir_y + dir_z * dir_z);
+                    float step = (dist > avg_step) ? avg_step : (dist * 0.5f);
+                    if (dist > 0.0001f) {
+                        dir_x /= dist; dir_y /= dist; dir_z /= dist;
+                    } else {
+                        dir_x = 0; dir_y = 0; dir_z = 0;
+                    }
+                    int new_idx = (int)(welded_vertices.size() / 3);
+                    welded_vertices.push_back(vx + dir_x * step);
+                    welded_vertices.push_back(vy + dir_y * step);
+                    welded_vertices.push_back(vz + dir_z * step);
+                    inner_loop.push_back(new_idx);
+                }
+
+                for (size_t k = 0; k < n; ++k) {
+                    int outer_curr = current_loop[k];
+                    int outer_next = current_loop[(k + 1) % n];
+                    int inner_next = inner_loop[(k + 1) % n];
+                    int inner_curr = inner_loop[k];
+                    active_faces.push_back(outer_curr);
+                    active_faces.push_back(outer_next);
+                    active_faces.push_back(inner_next);
+                    active_faces.push_back(inner_curr);
+                }
+                current_loop = inner_loop;
+            }
+
+            if (current_loop.size() == 3) {
+                active_faces.push_back(current_loop[0]);
+                active_faces.push_back(current_loop[1]);
+                active_faces.push_back(current_loop[2]);
+                active_faces.push_back(current_loop[2]);
+            } else if (current_loop.size() == 4) {
+                active_faces.push_back(current_loop[0]);
+                active_faces.push_back(current_loop[1]);
+                active_faces.push_back(current_loop[2]);
+                active_faces.push_back(current_loop[3]);
+            } else if (current_loop.size() > 4) {
+                float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+                size_t m = current_loop.size();
+                for (size_t k = 0; k < m; ++k) {
+                    cx += welded_vertices[3 * current_loop[k] + 0];
+                    cy += welded_vertices[3 * current_loop[k] + 1];
+                    cz += welded_vertices[3 * current_loop[k] + 2];
+                }
+                cx /= m; cy /= m; cz /= m;
+                int center_idx = (int)(welded_vertices.size() / 3);
+                welded_vertices.push_back(cx);
+                welded_vertices.push_back(cy);
+                welded_vertices.push_back(cz);
+
+                for (size_t k = 0; k < m; ++k) {
+                    active_faces.push_back(current_loop[k]);
+                    active_faces.push_back(current_loop[(k + 1) % m]);
+                    active_faces.push_back(center_idx);
+                    active_faces.push_back(center_idx);
+                }
+            }
+        };
+
         for (int v_start = 0; v_start < num_vertices; ++v_start) {
             while (!adj_boundary[v_start].empty()) {
                 int curr = v_start;
@@ -397,27 +513,9 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
                     if (it != loop.end()) {
                         std::vector<int> sub_loop(it, loop.end());
                         loop.erase(it, loop.end());
-                        if (sub_loop.size() >= 3 && sub_loop.size() <= 1024) {
+                        if (sub_loop.size() >= 3 && sub_loop.size() <= 4096) {
                             std::vector<int> rev_loop(sub_loop.rbegin(), sub_loop.rend());
-                            if (rev_loop.size() == 3) {
-                                active_faces.push_back(rev_loop[2]);
-                                active_faces.push_back(rev_loop[1]);
-                                active_faces.push_back(rev_loop[0]);
-                                active_faces.push_back(rev_loop[0]);
-                            } else if (rev_loop.size() == 4) {
-                                active_faces.push_back(rev_loop[3]);
-                                active_faces.push_back(rev_loop[2]);
-                                active_faces.push_back(rev_loop[1]);
-                                active_faces.push_back(rev_loop[0]);
-                            } else {
-                                int v0 = rev_loop[0];
-                                for (size_t idx = 1; idx < rev_loop.size() - 1; ++idx) {
-                                    active_faces.push_back(v0);
-                                    active_faces.push_back(rev_loop[idx]);
-                                    active_faces.push_back(rev_loop[idx + 1]);
-                                    active_faces.push_back(rev_loop[idx + 1]);
-                                }
-                            }
+                            fill_boundary_loop(rev_loop);
                         }
                         curr = next;
                         loop.push_back(curr);
@@ -428,33 +526,16 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
                     curr = next;
                 }
 
-                if (closed && loop.size() >= 3 && loop.size() <= 1024) {
+                if (closed && loop.size() >= 3 && loop.size() <= 4096) {
                     std::vector<int> rev_loop(loop.rbegin(), loop.rend());
-                    if (rev_loop.size() == 3) {
-                        active_faces.push_back(rev_loop[2]);
-                        active_faces.push_back(rev_loop[1]);
-                        active_faces.push_back(rev_loop[0]);
-                        active_faces.push_back(rev_loop[0]);
-                    } else if (rev_loop.size() == 4) {
-                        active_faces.push_back(rev_loop[3]);
-                        active_faces.push_back(rev_loop[2]);
-                        active_faces.push_back(rev_loop[1]);
-                        active_faces.push_back(rev_loop[0]);
-                    } else {
-                        int v0 = rev_loop[0];
-                        for (size_t idx = 1; idx < rev_loop.size() - 1; ++idx) {
-                            active_faces.push_back(v0);
-                            active_faces.push_back(rev_loop[idx]);
-                            active_faces.push_back(rev_loop[idx + 1]);
-                            active_faces.push_back(rev_loop[idx + 1]);
-                        }
-                    }
+                    fill_boundary_loop(rev_loop);
                 }
             }
         }
     }
 
-    std::vector<int> old_to_new_vertex(num_vertices, -1);
+    int final_num_vertices = (int)(welded_vertices.size() / 3);
+    std::vector<int> old_to_new_vertex(final_num_vertices, -1);
     DualContouringMesh processed_mesh;
     processed_mesh.vertices.reserve(welded_vertices.size());
     processed_mesh.faces.reserve(active_faces.size());
@@ -467,6 +548,10 @@ DualContouringMesh postprocess_mesh(const DualContouringMesh& mesh, bool close_h
             processed_mesh.vertices.push_back(welded_vertices[3 * old_v + 2]);
         }
         processed_mesh.faces.push_back(old_to_new_vertex[old_v]);
+    }
+
+    if (close_holes) {
+        merge_vertices_in_place(processed_mesh, 1e-5f);
     }
 
     return processed_mesh;

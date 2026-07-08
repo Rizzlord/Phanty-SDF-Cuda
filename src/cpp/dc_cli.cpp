@@ -123,6 +123,8 @@ int main(int argc, char** argv) {
     std::string gen_type = "";
     std::string normal_mode_str = "finite-difference";
     bool benchmark = false;
+    bool close_holes = false;
+    bool remove_floaters = false;
     int res = 64;
     int brick_size = 8;
     int chunk_size = 0;
@@ -155,6 +157,10 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--benchmark") {
             benchmark = true;
+        } else if (arg == "--close-holes") {
+            close_holes = true;
+        } else if (arg == "--remove-floaters") {
+            remove_floaters = true;
         } else {
             if (input_file.empty()) {
                 input_file = arg;
@@ -218,6 +224,12 @@ int main(int argc, char** argv) {
 
     DualContouringStats stats;
     DualContouringMesh mesh = backend->extract(grid, stats);
+
+    if (close_holes || remove_floaters) {
+        mesh = postprocess_mesh(mesh, close_holes, remove_floaters);
+        stats.vertex_count = (int)(mesh.vertices.size() / 3);
+        stats.face_count = (int)(mesh.faces.size() / 4);
+    }
 
     write_obj(output_file, mesh);
 
