@@ -457,7 +457,7 @@ __global__ void eikonal_relaxation_kernel(int nx, int ny, int nz, float vx, floa
 
 __global__ void rasterize_triangles_to_voxels_kernel(
     const float* d_vertices, const int* d_faces, int num_faces,
-    int vres, float ox, float oy, float oz, float vx, float vy, float vz,
+    int vres, float ox, float oy, float oz, float vox_vx, float vox_vy, float vox_vz,
     uint8_t* d_voxels
 ) {
     int f = blockIdx.x * blockDim.x + threadIdx.x;
@@ -478,23 +478,23 @@ __global__ void rasterize_triangles_to_voxels_kernel(
     float max_y = fmaxf(v0.y, fmaxf(v1.y, v2.y));
     float max_z = fmaxf(v0.z, fmaxf(v1.z, v2.z));
 
-    int bx0 = max(0, min(vres - 1, (int)floorf((min_x - ox) / vx)));
-    int bx1 = max(0, min(vres - 1, (int)floorf((max_x - ox) / vx)));
-    int by0 = max(0, min(vres - 1, (int)floorf((min_y - oy) / vy)));
-    int by1 = max(0, min(vres - 1, (int)floorf((max_y - oy) / vy)));
-    int bz0 = max(0, min(vres - 1, (int)floorf((min_z - oz) / vz)));
-    int bz1 = max(0, min(vres - 1, (int)floorf((max_z - oz) / vz)));
+    int bx0 = max(0, min(vres - 1, (int)floorf((min_x - ox) / vox_vx)));
+    int bx1 = max(0, min(vres - 1, (int)floorf((max_x - ox) / vox_vx)));
+    int by0 = max(0, min(vres - 1, (int)floorf((min_y - oy) / vox_vy)));
+    int by1 = max(0, min(vres - 1, (int)floorf((max_y - oy) / vox_vy)));
+    int bz0 = max(0, min(vres - 1, (int)floorf((min_z - oz) / vox_vz)));
+    int bz1 = max(0, min(vres - 1, (int)floorf((max_z - oz) / vox_vz)));
 
-    float max_v_dim = fmaxf(vx, fmaxf(vy, vz)) * 0.8660254f;
+    float max_v_dim = fmaxf(vox_vx, fmaxf(vox_vy, vox_vz)) * 0.8660254f;
 
     for (int bz = bz0; bz <= bz1; ++bz) {
         for (int by = by0; by <= by1; ++by) {
             for (int bx = bx0; bx <= bx1; ++bx) {
-                float3 c = make_float3(ox + bx * vx, oy + by * vy, oz + bz * vz);
+                float3 c = make_float3(ox + bx * vox_vx, oy + by * vox_vy, oz + bz * vox_vz);
                 float3 closest;
                 float d_sq = point_to_triangle_distance_sq(c, v0, v1, v2, closest);
                 if (d_sq <= max_v_dim * max_v_dim) {
-                    d_voxels[bx + vres * (by + vres * bz)] = 2;
+                    d_voxels[bx + (size_t)vres * (by + (size_t)vres * bz)] = 2;
                 }
             }
         }
@@ -502,8 +502,8 @@ __global__ void rasterize_triangles_to_voxels_kernel(
 }
 
 __global__ void flood_fill_voxel_exterior_kernel(int vres, uint8_t* d_voxels, uint8_t* d_ext, int* d_changed) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = vres * vres * vres;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
     if (idx >= total) return;
 
     if (d_ext[idx] == 1) return;
@@ -511,15 +511,15 @@ __global__ void flood_fill_voxel_exterior_kernel(int vres, uint8_t* d_voxels, ui
 
     int ix = idx % vres;
     int iy = (idx / vres) % vres;
-    int iz = idx / (vres * vres);
+    int iz = idx / ((size_t)vres * vres);
 
     bool n_ext = false;
     if (ix > 0 && d_ext[idx - 1] == 1) n_ext = true;
     else if (ix < vres - 1 && d_ext[idx + 1] == 1) n_ext = true;
     else if (iy > 0 && d_ext[idx - vres] == 1) n_ext = true;
     else if (iy < vres - 1 && d_ext[idx + vres] == 1) n_ext = true;
-    else if (iz > 0 && d_ext[idx - vres * vres] == 1) n_ext = true;
-    else if (iz < vres - 1 && d_ext[idx + vres * vres] == 1) n_ext = true;
+    else if (iz > 0 && d_ext[idx - (size_t)vres * vres] == 1) n_ext = true;
+    else if (iz < vres - 1 && d_ext[idx + (size_t)vres * vres] == 1) n_ext = true;
 
     if (n_ext) {
         d_ext[idx] = 1;
@@ -528,12 +528,12 @@ __global__ void flood_fill_voxel_exterior_kernel(int vres, uint8_t* d_voxels, ui
 }
 
 __global__ void init_voxel_exterior_kernel(int vres, uint8_t* d_voxels, uint8_t* d_ext) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = vres * vres * vres;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
     if (idx >= total) return;
     int ix = idx % vres;
     int iy = (idx / vres) % vres;
-    int iz = idx / (vres * vres);
+    int iz = idx / ((size_t)vres * vres);
 
     if (ix == 0 || ix == vres - 1 || iy == 0 || iy == vres - 1 || iz == 0 || iz == vres - 1) {
         if (d_voxels[idx] != 2) d_ext[idx] = 1;
@@ -544,38 +544,38 @@ __global__ void init_voxel_exterior_kernel(int vres, uint8_t* d_voxels, uint8_t*
 }
 
 __global__ void finalize_solid_voxels_kernel(int vres, uint8_t* d_voxels, const uint8_t* d_ext) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = vres * vres * vres;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
     if (idx >= total) return;
     if (d_ext[idx] == 0) d_voxels[idx] = 1;
     else d_voxels[idx] = 0;
 }
 
 __global__ void init_voxel_labels_kernel(int vres, const uint8_t* d_voxels, int* d_labels) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = vres * vres * vres;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
     if (idx >= total) return;
-    if (d_voxels[idx] == 1) d_labels[idx] = idx;
+    if (d_voxels[idx] == 1) d_labels[idx] = (int)(idx % 2000000000);
     else d_labels[idx] = -1;
 }
 
 __global__ void propagate_voxel_labels_kernel(int vres, const uint8_t* d_voxels, int* d_labels, int* d_changed) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = vres * vres * vres;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
     if (idx >= total) return;
     if (d_voxels[idx] != 1) return;
 
     int ix = idx % vres;
     int iy = (idx / vres) % vres;
-    int iz = idx / (vres * vres);
+    int iz = idx / ((size_t)vres * vres);
 
     int max_l = d_labels[idx];
     if (ix > 0 && d_voxels[idx - 1] == 1) max_l = max(max_l, d_labels[idx - 1]);
     if (ix < vres - 1 && d_voxels[idx + 1] == 1) max_l = max(max_l, d_labels[idx + 1]);
     if (iy > 0 && d_voxels[idx - vres] == 1) max_l = max(max_l, d_labels[idx - vres]);
     if (iy < vres - 1 && d_voxels[idx + vres] == 1) max_l = max(max_l, d_labels[idx + vres]);
-    if (iz > 0 && d_voxels[idx - vres * vres] == 1) max_l = max(max_l, d_labels[idx - vres * vres]);
-    if (iz < vres - 1 && d_voxels[idx + vres * vres] == 1) max_l = max(max_l, d_labels[idx + vres * vres]);
+    if (iz > 0 && d_voxels[idx - (size_t)vres * vres] == 1) max_l = max(max_l, d_labels[idx - (size_t)vres * vres]);
+    if (iz < vres - 1 && d_voxels[idx + (size_t)vres * vres] == 1) max_l = max(max_l, d_labels[idx + (size_t)vres * vres]);
 
     if (max_l > d_labels[idx]) {
         d_labels[idx] = max_l;
@@ -583,52 +583,49 @@ __global__ void propagate_voxel_labels_kernel(int vres, const uint8_t* d_voxels,
     }
 }
 
-__global__ void count_voxel_labels_kernel(int total, const int* d_labels, int* d_label_counts) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void find_component_roots_kernel(int vres, const uint8_t* d_voxels, const int* d_labels, int* d_root_list, int* d_root_count, int max_roots) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
     if (idx >= total) return;
+    if (d_voxels[idx] != 1) return;
+
     int l = d_labels[idx];
-    if (l >= 0 && l < total) {
-        atomicAdd(&d_label_counts[l], 1);
+    if (l == (int)(idx % 2000000000)) {
+        int pos = atomicAdd(d_root_count, 1);
+        if (pos < max_roots) {
+            d_root_list[pos] = l;
+        }
     }
 }
 
-__global__ void keep_max_label_kernel(int total, uint8_t* d_voxels, const int* d_labels, int max_label) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void count_root_sizes_kernel(int vres, const uint8_t* d_voxels, const int* d_labels, const int* d_root_list, int num_roots, int* d_root_counts) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
+    if (idx >= total) return;
+    if (d_voxels[idx] != 1) return;
+
+    int l = d_labels[idx];
+    for (int i = 0; i < num_roots; ++i) {
+        if (d_root_list[i] == l) {
+            atomicAdd(&d_root_counts[i], 1);
+            break;
+        }
+    }
+}
+
+__global__ void keep_max_label_kernel(int vres, uint8_t* d_voxels, const int* d_labels, int max_label) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)vres * vres * vres;
     if (idx >= total) return;
     if (d_voxels[idx] == 1 && d_labels[idx] != max_label) {
         d_voxels[idx] = 0;
     }
 }
 
-__global__ void collect_solid_boundary_kernel(int vres, const uint8_t* d_voxels, int* d_boundary_list, int* d_boundary_count) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = vres * vres * vres;
-    if (idx >= total) return;
-    if (d_voxels[idx] != 1) return;
-
-    int ix = idx % vres;
-    int iy = (idx / vres) % vres;
-    int iz = idx / (vres * vres);
-
-    bool has_ext = false;
-    if (ix == 0 || d_voxels[idx - 1] == 0) has_ext = true;
-    else if (ix == vres - 1 || d_voxels[idx + 1] == 0) has_ext = true;
-    else if (iy == 0 || d_voxels[idx - vres] == 0) has_ext = true;
-    else if (iy == vres - 1 || d_voxels[idx + vres] == 0) has_ext = true;
-    else if (iz == 0 || d_voxels[idx - vres * vres] == 0) has_ext = true;
-    else if (iz == vres - 1 || d_voxels[idx + vres * vres] == 0) has_ext = true;
-
-    if (has_ext) {
-        int pos = atomicAdd(d_boundary_count, 1);
-        d_boundary_list[pos] = idx;
-    }
-}
-
 __global__ void evaluate_sdf_from_solid_kernel(
     int nx, int ny, int nz, float ox, float oy, float oz, float vx, float vy, float vz,
     int vres, float vox_vx, float vox_vy, float vox_vz,
-    const uint8_t* d_voxels, const int* d_boundary_list, int num_boundary,
-    float* d_values
+    const uint8_t* d_voxels, float* d_values
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_voxels = nx * ny * nz;
@@ -643,20 +640,37 @@ __global__ void evaluate_sdf_from_solid_kernel(
     int vbx = max(0, min(vres - 1, (int)floorf((p.x - ox) / vox_vx)));
     int vby = max(0, min(vres - 1, (int)floorf((p.y - oy) / vox_vy)));
     int vbz = max(0, min(vres - 1, (int)floorf((p.z - oz) / vox_vz)));
-    int v_idx = vbx + vres * (vby + vres * vbz);
+    size_t v_idx = vbx + (size_t)vres * (vby + (size_t)vres * vbz);
     float sign_val = (d_voxels[v_idx] == 1) ? -1.0f : 1.0f;
 
+    int r = max(6, (int)ceilf(6.0f * (fmaxf(vx, fmaxf(vy, vz)) / fmaxf(vox_vx, fmaxf(vox_vy, vox_vz)))));
+    r = min(16, r);
+
     float min_dist_sq = 3.402823466e+38f;
-    for (int i = 0; i < num_boundary; ++i) {
-        int b_idx = d_boundary_list[i];
-        int bx = b_idx % vres;
-        int by = (b_idx / vres) % vres;
-        int bz = b_idx / (vres * vres);
-        float3 bc = make_float3(ox + bx * vox_vx, oy + by * vox_vy, oz + bz * vox_vz);
-        float3 diff = p - bc;
-        float d_sq = dot(diff, diff);
-        if (d_sq < min_dist_sq) {
-            min_dist_sq = d_sq;
+
+    for (int bz = max(0, vbz - r); bz <= min(vres - 1, vbz + r); ++bz) {
+        for (int by = max(0, vby - r); by <= min(vres - 1, vby + r); ++by) {
+            for (int bx = max(0, vbx - r); bx <= min(vres - 1, vbx + r); ++bx) {
+                size_t c_idx = bx + (size_t)vres * (by + (size_t)vres * bz);
+                if (d_voxels[c_idx] == 1) {
+                    bool is_boundary = false;
+                    if (bx == 0 || d_voxels[c_idx - 1] == 0) is_boundary = true;
+                    else if (bx == vres - 1 || d_voxels[c_idx + 1] == 0) is_boundary = true;
+                    else if (by == 0 || d_voxels[c_idx - vres] == 0) is_boundary = true;
+                    else if (by == vres - 1 || d_voxels[c_idx + vres] == 0) is_boundary = true;
+                    else if (bz == 0 || d_voxels[c_idx - (size_t)vres * vres] == 0) is_boundary = true;
+                    else if (bz == vres - 1 || d_voxels[c_idx + (size_t)vres * vres] == 0) is_boundary = true;
+
+                    if (is_boundary) {
+                        float3 bc = make_float3(ox + bx * vox_vx, oy + by * vox_vy, oz + bz * vox_vz);
+                        float3 diff = p - bc;
+                        float d_sq = dot(diff, diff);
+                        if (d_sq < min_dist_sq) {
+                            min_dist_sq = d_sq;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -726,9 +740,11 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
 
         finalize_solid_voxels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext);
         CUDA_CHECK_SDF(cudaGetLastError());
+        CUDA_CHECK_SDF(cudaFree(d_ext));
+        d_ext = nullptr;
 
         int* d_labels = nullptr;
-        CUDA_CHECK_SDF(cudaMalloc(&d_labels, total_vox * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_labels, (size_t)total_vox * sizeof(int)));
         init_voxel_labels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels);
         CUDA_CHECK_SDF(cudaGetLastError());
 
@@ -741,50 +757,65 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
             if (h_changed == 0) break;
         }
 
-        int* d_label_counts = nullptr;
-        CUDA_CHECK_SDF(cudaMalloc(&d_label_counts, total_vox * sizeof(int)));
-        CUDA_CHECK_SDF(cudaMemset(d_label_counts, 0, total_vox * sizeof(int)));
-        count_voxel_labels_kernel<<<blocks_vox, threads>>>(total_vox, d_labels, d_label_counts);
+        int max_roots = 10000;
+        int* d_root_list = nullptr;
+        int* d_root_count = nullptr;
+        int* d_root_counts = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_root_list, max_roots * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_root_count, sizeof(int)));
+        CUDA_CHECK_SDF(cudaMemset(d_root_count, 0, sizeof(int)));
+
+        find_component_roots_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, d_root_list, d_root_count, max_roots);
         CUDA_CHECK_SDF(cudaGetLastError());
 
-        std::vector<int> h_counts(total_vox);
-        CUDA_CHECK_SDF(cudaMemcpy(h_counts.data(), d_label_counts, total_vox * sizeof(int), cudaMemcpyDeviceToHost));
-        int max_count = 0;
-        int max_label = -1;
-        for (int i = 0; i < total_vox; ++i) {
-            if (h_counts[i] > max_count) {
-                max_count = h_counts[i];
-                max_label = i;
-            }
-        }
+        int num_roots = 0;
+        CUDA_CHECK_SDF(cudaMemcpy(&num_roots, d_root_count, sizeof(int), cudaMemcpyDeviceToHost));
+        num_roots = min(num_roots, max_roots);
 
-        if (max_label >= 0) {
-            keep_max_label_kernel<<<blocks_vox, threads>>>(total_vox, d_voxels, d_labels, max_label);
+        if (num_roots > 0) {
+            CUDA_CHECK_SDF(cudaMalloc(&d_root_counts, num_roots * sizeof(int)));
+            CUDA_CHECK_SDF(cudaMemset(d_root_counts, 0, num_roots * sizeof(int)));
+            count_root_sizes_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, d_root_list, num_roots, d_root_counts);
             CUDA_CHECK_SDF(cudaGetLastError());
+
+            std::vector<int> h_root_list(num_roots);
+            std::vector<int> h_root_counts(num_roots);
+            CUDA_CHECK_SDF(cudaMemcpy(h_root_list.data(), d_root_list, num_roots * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK_SDF(cudaMemcpy(h_root_counts.data(), d_root_counts, num_roots * sizeof(int), cudaMemcpyDeviceToHost));
+
+            int max_count = 0;
+            int max_label = -1;
+            for (int i = 0; i < num_roots; ++i) {
+                if (h_root_counts[i] > max_count) {
+                    max_count = h_root_counts[i];
+                    max_label = h_root_list[i];
+                }
+            }
+
+            if (max_label >= 0) {
+                keep_max_label_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, max_label);
+                CUDA_CHECK_SDF(cudaGetLastError());
+            }
+            CUDA_CHECK_SDF(cudaFree(d_root_counts));
         }
+        CUDA_CHECK_SDF(cudaFree(d_root_count));
+        CUDA_CHECK_SDF(cudaFree(d_root_list));
+        CUDA_CHECK_SDF(cudaFree(d_labels));
+        d_labels = nullptr;
 
-        int* d_boundary_list = nullptr;
-        int* d_boundary_count = nullptr;
-        CUDA_CHECK_SDF(cudaMalloc(&d_boundary_list, total_vox * sizeof(int)));
-        CUDA_CHECK_SDF(cudaMalloc(&d_boundary_count, sizeof(int)));
-        CUDA_CHECK_SDF(cudaMemset(d_boundary_count, 0, sizeof(int)));
-
-        collect_solid_boundary_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_boundary_list, d_boundary_count);
-        CUDA_CHECK_SDF(cudaGetLastError());
-
-        int num_boundary = 0;
-        CUDA_CHECK_SDF(cudaMemcpy(&num_boundary, d_boundary_count, sizeof(int), cudaMemcpyDeviceToHost));
-
-        evaluate_sdf_from_solid_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, vres, vox_vx, vox_vy, vox_vz, d_voxels, d_boundary_list, num_boundary, d_values);
+        evaluate_sdf_from_solid_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, vres, vox_vx, vox_vy, vox_vz, d_voxels, d_values);
         CUDA_CHECK_SDF(cudaGetLastError());
         CUDA_CHECK_SDF(cudaDeviceSynchronize());
 
-        CUDA_CHECK_SDF(cudaFree(d_boundary_count));
-        CUDA_CHECK_SDF(cudaFree(d_boundary_list));
-        CUDA_CHECK_SDF(cudaFree(d_label_counts));
-        CUDA_CHECK_SDF(cudaFree(d_labels));
+        float* d_values_temp = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_values_temp, (size_t)total_voxels * sizeof(float)));
+        for (int iter = 0; iter < 12; ++iter) {
+            eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values, d_values_temp);
+            eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values_temp, d_values);
+        }
+        CUDA_CHECK_SDF(cudaFree(d_values_temp));
+
         CUDA_CHECK_SDF(cudaFree(d_changed));
-        CUDA_CHECK_SDF(cudaFree(d_ext));
         CUDA_CHECK_SDF(cudaFree(d_voxels));
     } else {
         int gx = max(1, nx / 8);
