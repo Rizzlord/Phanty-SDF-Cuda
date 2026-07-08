@@ -455,13 +455,227 @@ __global__ void eikonal_relaxation_kernel(int nx, int ny, int nz, float vx, floa
     d_values_out[idx] = sign_val * abs_val;
 }
 
+__global__ void rasterize_triangles_to_voxels_kernel(
+    const float* d_vertices, const int* d_faces, int num_faces,
+    int vres, float ox, float oy, float oz, float vx, float vy, float vz,
+    uint8_t* d_voxels
+) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= num_faces) return;
+
+    int i0 = d_faces[3 * f + 0];
+    int i1 = d_faces[3 * f + 1];
+    int i2 = d_faces[3 * f + 2];
+
+    float3 v0 = make_float3(d_vertices[3 * i0 + 0], d_vertices[3 * i0 + 1], d_vertices[3 * i0 + 2]);
+    float3 v1 = make_float3(d_vertices[3 * i1 + 0], d_vertices[3 * i1 + 1], d_vertices[3 * i1 + 2]);
+    float3 v2 = make_float3(d_vertices[3 * i2 + 0], d_vertices[3 * i2 + 1], d_vertices[3 * i2 + 2]);
+
+    float min_x = fminf(v0.x, fminf(v1.x, v2.x));
+    float min_y = fminf(v0.y, fminf(v1.y, v2.y));
+    float min_z = fminf(v0.z, fminf(v1.z, v2.z));
+    float max_x = fmaxf(v0.x, fmaxf(v1.x, v2.x));
+    float max_y = fmaxf(v0.y, fmaxf(v1.y, v2.y));
+    float max_z = fmaxf(v0.z, fmaxf(v1.z, v2.z));
+
+    int bx0 = max(0, min(vres - 1, (int)floorf((min_x - ox) / vx)));
+    int bx1 = max(0, min(vres - 1, (int)floorf((max_x - ox) / vx)));
+    int by0 = max(0, min(vres - 1, (int)floorf((min_y - oy) / vy)));
+    int by1 = max(0, min(vres - 1, (int)floorf((max_y - oy) / vy)));
+    int bz0 = max(0, min(vres - 1, (int)floorf((min_z - oz) / vz)));
+    int bz1 = max(0, min(vres - 1, (int)floorf((max_z - oz) / vz)));
+
+    float max_v_dim = fmaxf(vx, fmaxf(vy, vz)) * 0.8660254f;
+
+    for (int bz = bz0; bz <= bz1; ++bz) {
+        for (int by = by0; by <= by1; ++by) {
+            for (int bx = bx0; bx <= bx1; ++bx) {
+                float3 c = make_float3(ox + bx * vx, oy + by * vy, oz + bz * vz);
+                float3 closest;
+                float d_sq = point_to_triangle_distance_sq(c, v0, v1, v2, closest);
+                if (d_sq <= max_v_dim * max_v_dim) {
+                    d_voxels[bx + vres * (by + vres * bz)] = 2;
+                }
+            }
+        }
+    }
+}
+
+__global__ void flood_fill_voxel_exterior_kernel(int vres, uint8_t* d_voxels, uint8_t* d_ext, int* d_changed) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = vres * vres * vres;
+    if (idx >= total) return;
+
+    if (d_ext[idx] == 1) return;
+    if (d_voxels[idx] == 2) return;
+
+    int ix = idx % vres;
+    int iy = (idx / vres) % vres;
+    int iz = idx / (vres * vres);
+
+    bool n_ext = false;
+    if (ix > 0 && d_ext[idx - 1] == 1) n_ext = true;
+    else if (ix < vres - 1 && d_ext[idx + 1] == 1) n_ext = true;
+    else if (iy > 0 && d_ext[idx - vres] == 1) n_ext = true;
+    else if (iy < vres - 1 && d_ext[idx + vres] == 1) n_ext = true;
+    else if (iz > 0 && d_ext[idx - vres * vres] == 1) n_ext = true;
+    else if (iz < vres - 1 && d_ext[idx + vres * vres] == 1) n_ext = true;
+
+    if (n_ext) {
+        d_ext[idx] = 1;
+        *d_changed = 1;
+    }
+}
+
+__global__ void init_voxel_exterior_kernel(int vres, uint8_t* d_voxels, uint8_t* d_ext) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = vres * vres * vres;
+    if (idx >= total) return;
+    int ix = idx % vres;
+    int iy = (idx / vres) % vres;
+    int iz = idx / (vres * vres);
+
+    if (ix == 0 || ix == vres - 1 || iy == 0 || iy == vres - 1 || iz == 0 || iz == vres - 1) {
+        if (d_voxels[idx] != 2) d_ext[idx] = 1;
+        else d_ext[idx] = 0;
+    } else {
+        d_ext[idx] = 0;
+    }
+}
+
+__global__ void finalize_solid_voxels_kernel(int vres, uint8_t* d_voxels, const uint8_t* d_ext) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = vres * vres * vres;
+    if (idx >= total) return;
+    if (d_ext[idx] == 0) d_voxels[idx] = 1;
+    else d_voxels[idx] = 0;
+}
+
+__global__ void init_voxel_labels_kernel(int vres, const uint8_t* d_voxels, int* d_labels) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = vres * vres * vres;
+    if (idx >= total) return;
+    if (d_voxels[idx] == 1) d_labels[idx] = idx;
+    else d_labels[idx] = -1;
+}
+
+__global__ void propagate_voxel_labels_kernel(int vres, const uint8_t* d_voxels, int* d_labels, int* d_changed) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = vres * vres * vres;
+    if (idx >= total) return;
+    if (d_voxels[idx] != 1) return;
+
+    int ix = idx % vres;
+    int iy = (idx / vres) % vres;
+    int iz = idx / (vres * vres);
+
+    int max_l = d_labels[idx];
+    if (ix > 0 && d_voxels[idx - 1] == 1) max_l = max(max_l, d_labels[idx - 1]);
+    if (ix < vres - 1 && d_voxels[idx + 1] == 1) max_l = max(max_l, d_labels[idx + 1]);
+    if (iy > 0 && d_voxels[idx - vres] == 1) max_l = max(max_l, d_labels[idx - vres]);
+    if (iy < vres - 1 && d_voxels[idx + vres] == 1) max_l = max(max_l, d_labels[idx + vres]);
+    if (iz > 0 && d_voxels[idx - vres * vres] == 1) max_l = max(max_l, d_labels[idx - vres * vres]);
+    if (iz < vres - 1 && d_voxels[idx + vres * vres] == 1) max_l = max(max_l, d_labels[idx + vres * vres]);
+
+    if (max_l > d_labels[idx]) {
+        d_labels[idx] = max_l;
+        *d_changed = 1;
+    }
+}
+
+__global__ void count_voxel_labels_kernel(int total, const int* d_labels, int* d_label_counts) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    int l = d_labels[idx];
+    if (l >= 0 && l < total) {
+        atomicAdd(&d_label_counts[l], 1);
+    }
+}
+
+__global__ void keep_max_label_kernel(int total, uint8_t* d_voxels, const int* d_labels, int max_label) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    if (d_voxels[idx] == 1 && d_labels[idx] != max_label) {
+        d_voxels[idx] = 0;
+    }
+}
+
+__global__ void collect_solid_boundary_kernel(int vres, const uint8_t* d_voxels, int* d_boundary_list, int* d_boundary_count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = vres * vres * vres;
+    if (idx >= total) return;
+    if (d_voxels[idx] != 1) return;
+
+    int ix = idx % vres;
+    int iy = (idx / vres) % vres;
+    int iz = idx / (vres * vres);
+
+    bool has_ext = false;
+    if (ix == 0 || d_voxels[idx - 1] == 0) has_ext = true;
+    else if (ix == vres - 1 || d_voxels[idx + 1] == 0) has_ext = true;
+    else if (iy == 0 || d_voxels[idx - vres] == 0) has_ext = true;
+    else if (iy == vres - 1 || d_voxels[idx + vres] == 0) has_ext = true;
+    else if (iz == 0 || d_voxels[idx - vres * vres] == 0) has_ext = true;
+    else if (iz == vres - 1 || d_voxels[idx + vres * vres] == 0) has_ext = true;
+
+    if (has_ext) {
+        int pos = atomicAdd(d_boundary_count, 1);
+        d_boundary_list[pos] = idx;
+    }
+}
+
+__global__ void evaluate_sdf_from_solid_kernel(
+    int nx, int ny, int nz, float ox, float oy, float oz, float vx, float vy, float vz,
+    int vres, float vox_vx, float vox_vy, float vox_vz,
+    const uint8_t* d_voxels, const int* d_boundary_list, int num_boundary,
+    float* d_values
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_voxels = nx * ny * nz;
+    if (idx >= total_voxels) return;
+
+    int ix = idx % nx;
+    int iy = (idx / nx) % ny;
+    int iz = idx / (nx * ny);
+
+    float3 p = make_float3(ox + ix * vx, oy + iy * vy, oz + iz * vz);
+
+    int vbx = max(0, min(vres - 1, (int)floorf((p.x - ox) / vox_vx)));
+    int vby = max(0, min(vres - 1, (int)floorf((p.y - oy) / vox_vy)));
+    int vbz = max(0, min(vres - 1, (int)floorf((p.z - oz) / vox_vz)));
+    int v_idx = vbx + vres * (vby + vres * vbz);
+    float sign_val = (d_voxels[v_idx] == 1) ? -1.0f : 1.0f;
+
+    float min_dist_sq = 3.402823466e+38f;
+    for (int i = 0; i < num_boundary; ++i) {
+        int b_idx = d_boundary_list[i];
+        int bx = b_idx % vres;
+        int by = (b_idx / vres) % vres;
+        int bz = b_idx / (vres * vres);
+        float3 bc = make_float3(ox + bx * vox_vx, oy + by * vox_vy, oz + bz * vox_vz);
+        float3 diff = p - bc;
+        float d_sq = dot(diff, diff);
+        if (d_sq < min_dist_sq) {
+            min_dist_sq = d_sq;
+        }
+    }
+
+    if (min_dist_sq == 3.402823466e+38f) {
+        d_values[idx] = sign_val * 10.0f;
+    } else {
+        d_values[idx] = sign_val * sqrtf(min_dist_sq);
+    }
+}
+
 DenseSdfGridDevice compute_mesh_sdf_device_cuda(
     const float* vertices, int num_vertices,
     const int* faces, int num_faces,
     int nx, int ny, int nz,
     float ox, float oy, float oz,
     float vx, float vy, float vz,
-    float* out_ms
+    float* out_ms,
+    bool voxelize_first,
+    int voxel_res
 ) {
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -472,99 +686,196 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
     CUDA_CHECK_SDF(cudaMemcpy(d_vertices, vertices, num_vertices * 3 * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK_SDF(cudaMemcpy(d_faces, faces, num_faces * 3 * sizeof(int), cudaMemcpyHostToDevice));
 
-    int gx = max(1, nx / 8);
-    int gy = max(1, ny / 8);
-    int gz = max(1, nz / 8);
-    float bdx = (nx * vx) / gx;
-    float bdy = (ny * vy) / gy;
-    float bdz = (nz * vz) / gz;
-    float margin = 2.0f * fmaxf(vx, fmaxf(vy, vz));
-
-    int num_bins = gx * gy * gz;
-    int* d_bin_counts = nullptr;
-    int* d_bin_offsets = nullptr;
-    int* d_bin_write_counts = nullptr;
-    int* d_bin_triangles = nullptr;
-
-    CUDA_CHECK_SDF(cudaMalloc(&d_bin_counts, (num_bins + 1) * sizeof(int)));
-    CUDA_CHECK_SDF(cudaMalloc(&d_bin_offsets, (num_bins + 1) * sizeof(int)));
-    CUDA_CHECK_SDF(cudaMalloc(&d_bin_write_counts, num_bins * sizeof(int)));
-    CUDA_CHECK_SDF(cudaMemset(d_bin_counts, 0, (num_bins + 1) * sizeof(int)));
-    CUDA_CHECK_SDF(cudaMemset(d_bin_write_counts, 0, num_bins * sizeof(int)));
-
-    int threads = 256;
-    int blocks_f = (num_faces + threads - 1) / threads;
-    compute_bin_counts_kernel<<<blocks_f, threads>>>(d_vertices, d_faces, num_faces, gx, gy, gz, ox, oy, oz, bdx, bdy, bdz, margin, d_bin_counts);
-    CUDA_CHECK_SDF(cudaGetLastError());
-
-    thrust::device_ptr<int> dev_counts(d_bin_counts);
-    thrust::device_ptr<int> dev_offsets(d_bin_offsets);
-    thrust::exclusive_scan(dev_counts, dev_counts + num_bins + 1, dev_offsets);
-
-    int total_bin_triangles = 0;
-    CUDA_CHECK_SDF(cudaMemcpy(&total_bin_triangles, d_bin_offsets + num_bins, sizeof(int), cudaMemcpyDeviceToHost));
-
-    if (total_bin_triangles > 0) {
-        CUDA_CHECK_SDF(cudaMalloc(&d_bin_triangles, total_bin_triangles * sizeof(int)));
-        populate_bins_kernel<<<blocks_f, threads>>>(d_vertices, d_faces, num_faces, gx, gy, gz, ox, oy, oz, bdx, bdy, bdz, margin, d_bin_offsets, d_bin_write_counts, d_bin_triangles);
-        CUDA_CHECK_SDF(cudaGetLastError());
-    }
-
-    uint8_t* d_bin_active = nullptr;
-    CUDA_CHECK_SDF(cudaMalloc(&d_bin_active, num_bins * sizeof(uint8_t)));
-    int blocks_bins = (num_bins + threads - 1) / threads;
-    mark_active_bins_kernel<<<blocks_bins, threads>>>(gx, gy, gz, d_bin_offsets, d_bin_active);
-    CUDA_CHECK_SDF(cudaGetLastError());
-
     float* d_values = nullptr;
     int total_voxels = nx * ny * nz;
     CUDA_CHECK_SDF(cudaMalloc(&d_values, total_voxels * sizeof(float)));
-
+    int threads = 256;
     int blocks_v = (total_voxels + threads - 1) / threads;
-    evaluate_sdf_grid_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, gx, gy, gz, bdx, bdy, bdz, d_bin_offsets, d_bin_triangles, d_vertices, d_faces, d_bin_active, d_values);
-    CUDA_CHECK_SDF(cudaGetLastError());
 
-    uint8_t* d_exterior_mask = nullptr;
-    int* d_changed = nullptr;
-    CUDA_CHECK_SDF(cudaMalloc(&d_exterior_mask, total_voxels * sizeof(uint8_t)));
-    CUDA_CHECK_SDF(cudaMalloc(&d_changed, sizeof(int)));
+    if (voxelize_first) {
+        int vres = max(32, min(2048, voxel_res));
+        int total_vox = vres * vres * vres;
+        float vox_vx = (nx * vx) / vres;
+        float vox_vy = (ny * vy) / vres;
+        float vox_vz = (nz * vz) / vres;
 
-    init_exterior_border_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask);
-    CUDA_CHECK_SDF(cudaGetLastError());
+        uint8_t* d_voxels = nullptr;
+        uint8_t* d_ext = nullptr;
+        int* d_changed = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_voxels, total_vox * sizeof(uint8_t)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_ext, total_vox * sizeof(uint8_t)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_changed, sizeof(int)));
+        CUDA_CHECK_SDF(cudaMemset(d_voxels, 0, total_vox * sizeof(uint8_t)));
 
-    for (int iter = 0; iter < 40; ++iter) {
-        int h_changed = 0;
-        CUDA_CHECK_SDF(cudaMemcpy(d_changed, &h_changed, sizeof(int), cudaMemcpyHostToDevice));
-        propagate_exterior_signs_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask, d_changed);
+        int blocks_f = (num_faces + threads - 1) / threads;
+        rasterize_triangles_to_voxels_kernel<<<blocks_f, threads>>>(d_vertices, d_faces, num_faces, vres, ox, oy, oz, vox_vx, vox_vy, vox_vz, d_voxels);
         CUDA_CHECK_SDF(cudaGetLastError());
-        CUDA_CHECK_SDF(cudaMemcpy(&h_changed, d_changed, sizeof(int), cudaMemcpyDeviceToHost));
-        if (h_changed == 0) break;
-    }
 
-    resolve_interior_cavities_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask);
-    CUDA_CHECK_SDF(cudaGetLastError());
+        int blocks_vox = (total_vox + threads - 1) / threads;
+        init_voxel_exterior_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext);
+        CUDA_CHECK_SDF(cudaGetLastError());
 
-    float* d_values_tmp = nullptr;
-    CUDA_CHECK_SDF(cudaMalloc(&d_values_tmp, total_voxels * sizeof(float)));
-    for (int iter = 0; iter < 4; ++iter) {
-        if (iter % 2 == 0) {
-            eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values, d_values_tmp);
-        } else {
-            eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values_tmp, d_values);
+        for (int iter = 0; iter < 40; ++iter) {
+            int h_changed = 0;
+            CUDA_CHECK_SDF(cudaMemcpy(d_changed, &h_changed, sizeof(int), cudaMemcpyHostToDevice));
+            flood_fill_voxel_exterior_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext, d_changed);
+            CUDA_CHECK_SDF(cudaGetLastError());
+            CUDA_CHECK_SDF(cudaMemcpy(&h_changed, d_changed, sizeof(int), cudaMemcpyDeviceToHost));
+            if (h_changed == 0) break;
         }
+
+        finalize_solid_voxels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_ext);
         CUDA_CHECK_SDF(cudaGetLastError());
+
+        int* d_labels = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_labels, total_vox * sizeof(int)));
+        init_voxel_labels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels);
+        CUDA_CHECK_SDF(cudaGetLastError());
+
+        for (int iter = 0; iter < 40; ++iter) {
+            int h_changed = 0;
+            CUDA_CHECK_SDF(cudaMemcpy(d_changed, &h_changed, sizeof(int), cudaMemcpyHostToDevice));
+            propagate_voxel_labels_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_labels, d_changed);
+            CUDA_CHECK_SDF(cudaGetLastError());
+            CUDA_CHECK_SDF(cudaMemcpy(&h_changed, d_changed, sizeof(int), cudaMemcpyDeviceToHost));
+            if (h_changed == 0) break;
+        }
+
+        int* d_label_counts = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_label_counts, total_vox * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMemset(d_label_counts, 0, total_vox * sizeof(int)));
+        count_voxel_labels_kernel<<<blocks_vox, threads>>>(total_vox, d_labels, d_label_counts);
+        CUDA_CHECK_SDF(cudaGetLastError());
+
+        std::vector<int> h_counts(total_vox);
+        CUDA_CHECK_SDF(cudaMemcpy(h_counts.data(), d_label_counts, total_vox * sizeof(int), cudaMemcpyDeviceToHost));
+        int max_count = 0;
+        int max_label = -1;
+        for (int i = 0; i < total_vox; ++i) {
+            if (h_counts[i] > max_count) {
+                max_count = h_counts[i];
+                max_label = i;
+            }
+        }
+
+        if (max_label >= 0) {
+            keep_max_label_kernel<<<blocks_vox, threads>>>(total_vox, d_voxels, d_labels, max_label);
+            CUDA_CHECK_SDF(cudaGetLastError());
+        }
+
+        int* d_boundary_list = nullptr;
+        int* d_boundary_count = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_boundary_list, total_vox * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_boundary_count, sizeof(int)));
+        CUDA_CHECK_SDF(cudaMemset(d_boundary_count, 0, sizeof(int)));
+
+        collect_solid_boundary_kernel<<<blocks_vox, threads>>>(vres, d_voxels, d_boundary_list, d_boundary_count);
+        CUDA_CHECK_SDF(cudaGetLastError());
+
+        int num_boundary = 0;
+        CUDA_CHECK_SDF(cudaMemcpy(&num_boundary, d_boundary_count, sizeof(int), cudaMemcpyDeviceToHost));
+
+        evaluate_sdf_from_solid_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, vres, vox_vx, vox_vy, vox_vz, d_voxels, d_boundary_list, num_boundary, d_values);
+        CUDA_CHECK_SDF(cudaGetLastError());
+        CUDA_CHECK_SDF(cudaDeviceSynchronize());
+
+        CUDA_CHECK_SDF(cudaFree(d_boundary_count));
+        CUDA_CHECK_SDF(cudaFree(d_boundary_list));
+        CUDA_CHECK_SDF(cudaFree(d_label_counts));
+        CUDA_CHECK_SDF(cudaFree(d_labels));
+        CUDA_CHECK_SDF(cudaFree(d_changed));
+        CUDA_CHECK_SDF(cudaFree(d_ext));
+        CUDA_CHECK_SDF(cudaFree(d_voxels));
+    } else {
+        int gx = max(1, nx / 8);
+        int gy = max(1, ny / 8);
+        int gz = max(1, nz / 8);
+        float bdx = (nx * vx) / gx;
+        float bdy = (ny * vy) / gy;
+        float bdz = (nz * vz) / gz;
+        float margin = 2.0f * fmaxf(vx, fmaxf(vy, vz));
+
+        int num_bins = gx * gy * gz;
+        int* d_bin_counts = nullptr;
+        int* d_bin_offsets = nullptr;
+        int* d_bin_write_counts = nullptr;
+        int* d_bin_triangles = nullptr;
+
+        CUDA_CHECK_SDF(cudaMalloc(&d_bin_counts, (num_bins + 1) * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_bin_offsets, (num_bins + 1) * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_bin_write_counts, num_bins * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMemset(d_bin_counts, 0, (num_bins + 1) * sizeof(int)));
+        CUDA_CHECK_SDF(cudaMemset(d_bin_write_counts, 0, num_bins * sizeof(int)));
+
+        int blocks_f = (num_faces + threads - 1) / threads;
+        compute_bin_counts_kernel<<<blocks_f, threads>>>(d_vertices, d_faces, num_faces, gx, gy, gz, ox, oy, oz, bdx, bdy, bdz, margin, d_bin_counts);
+        CUDA_CHECK_SDF(cudaGetLastError());
+
+        thrust::device_ptr<int> dev_counts(d_bin_counts);
+        thrust::device_ptr<int> dev_offsets(d_bin_offsets);
+        thrust::exclusive_scan(dev_counts, dev_counts + num_bins + 1, dev_offsets);
+
+        int total_bin_triangles = 0;
+        CUDA_CHECK_SDF(cudaMemcpy(&total_bin_triangles, d_bin_offsets + num_bins, sizeof(int), cudaMemcpyDeviceToHost));
+
+        if (total_bin_triangles > 0) {
+            CUDA_CHECK_SDF(cudaMalloc(&d_bin_triangles, total_bin_triangles * sizeof(int)));
+            populate_bins_kernel<<<blocks_f, threads>>>(d_vertices, d_faces, num_faces, gx, gy, gz, ox, oy, oz, bdx, bdy, bdz, margin, d_bin_offsets, d_bin_write_counts, d_bin_triangles);
+            CUDA_CHECK_SDF(cudaGetLastError());
+        }
+
+        uint8_t* d_bin_active = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_bin_active, num_bins * sizeof(uint8_t)));
+        int blocks_bins = (num_bins + threads - 1) / threads;
+        mark_active_bins_kernel<<<blocks_bins, threads>>>(gx, gy, gz, d_bin_offsets, d_bin_active);
+        CUDA_CHECK_SDF(cudaGetLastError());
+
+        evaluate_sdf_grid_kernel<<<blocks_v, threads>>>(nx, ny, nz, ox, oy, oz, vx, vy, vz, gx, gy, gz, bdx, bdy, bdz, d_bin_offsets, d_bin_triangles, d_vertices, d_faces, d_bin_active, d_values);
+        CUDA_CHECK_SDF(cudaGetLastError());
+
+        uint8_t* d_exterior_mask = nullptr;
+        int* d_changed = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_exterior_mask, total_voxels * sizeof(uint8_t)));
+        CUDA_CHECK_SDF(cudaMalloc(&d_changed, sizeof(int)));
+
+        init_exterior_border_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask);
+        CUDA_CHECK_SDF(cudaGetLastError());
+
+        for (int iter = 0; iter < 40; ++iter) {
+            int h_changed = 0;
+            CUDA_CHECK_SDF(cudaMemcpy(d_changed, &h_changed, sizeof(int), cudaMemcpyHostToDevice));
+            propagate_exterior_signs_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask, d_changed);
+            CUDA_CHECK_SDF(cudaGetLastError());
+            CUDA_CHECK_SDF(cudaMemcpy(&h_changed, d_changed, sizeof(int), cudaMemcpyDeviceToHost));
+            if (h_changed == 0) break;
+        }
+
+        resolve_interior_cavities_kernel<<<blocks_v, threads>>>(nx, ny, nz, d_values, d_exterior_mask);
+        CUDA_CHECK_SDF(cudaGetLastError());
+
+        float* d_values_tmp = nullptr;
+        CUDA_CHECK_SDF(cudaMalloc(&d_values_tmp, total_voxels * sizeof(float)));
+        for (int iter = 0; iter < 4; ++iter) {
+            if (iter % 2 == 0) {
+                eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values, d_values_tmp);
+            } else {
+                eikonal_relaxation_kernel<<<blocks_v, threads>>>(nx, ny, nz, vx, vy, vz, d_values_tmp, d_values);
+            }
+            CUDA_CHECK_SDF(cudaGetLastError());
+        }
+
+        CUDA_CHECK_SDF(cudaFree(d_values_tmp));
+        CUDA_CHECK_SDF(cudaFree(d_changed));
+        CUDA_CHECK_SDF(cudaFree(d_exterior_mask));
+        CUDA_CHECK_SDF(cudaDeviceSynchronize());
+
+        CUDA_CHECK_SDF(cudaFree(d_bin_active));
+        if (d_bin_triangles) CUDA_CHECK_SDF(cudaFree(d_bin_triangles));
+        CUDA_CHECK_SDF(cudaFree(d_bin_write_counts));
+        CUDA_CHECK_SDF(cudaFree(d_bin_offsets));
+        CUDA_CHECK_SDF(cudaFree(d_bin_counts));
     }
 
-    CUDA_CHECK_SDF(cudaFree(d_values_tmp));
-    CUDA_CHECK_SDF(cudaFree(d_changed));
-    CUDA_CHECK_SDF(cudaFree(d_exterior_mask));
-    CUDA_CHECK_SDF(cudaDeviceSynchronize());
-
-    CUDA_CHECK_SDF(cudaFree(d_bin_active));
-    if (d_bin_triangles) CUDA_CHECK_SDF(cudaFree(d_bin_triangles));
-    CUDA_CHECK_SDF(cudaFree(d_bin_write_counts));
-    CUDA_CHECK_SDF(cudaFree(d_bin_offsets));
-    CUDA_CHECK_SDF(cudaFree(d_bin_counts));
     CUDA_CHECK_SDF(cudaFree(d_faces));
     CUDA_CHECK_SDF(cudaFree(d_vertices));
 
@@ -593,9 +904,11 @@ DenseSdfGrid compute_mesh_sdf_cuda(
     int nx, int ny, int nz,
     float ox, float oy, float oz,
     float vx, float vy, float vz,
-    float* out_ms
+    float* out_ms,
+    bool voxelize_first,
+    int voxel_res
 ) {
-    DenseSdfGridDevice dev_grid = compute_mesh_sdf_device_cuda(vertices, num_vertices, faces, num_faces, nx, ny, nz, ox, oy, oz, vx, vy, vz, out_ms);
+    DenseSdfGridDevice dev_grid = compute_mesh_sdf_device_cuda(vertices, num_vertices, faces, num_faces, nx, ny, nz, ox, oy, oz, vx, vy, vz, out_ms, voxelize_first, voxel_res);
 
     DenseSdfGrid host_grid;
     host_grid.nx = nx;
@@ -608,10 +921,9 @@ DenseSdfGrid compute_mesh_sdf_cuda(
     host_grid.vy = vy;
     host_grid.vz = vz;
     host_grid.values.resize(nx * ny * nz);
-
     CUDA_CHECK_SDF(cudaMemcpy(host_grid.values.data(), dev_grid.d_values, nx * ny * nz * sizeof(float), cudaMemcpyDeviceToHost));
-    free_mesh_sdf_device_cuda(dev_grid);
 
+    free_mesh_sdf_device_cuda(dev_grid);
     return host_grid;
 }
 

@@ -9,7 +9,9 @@ DenseSdfGrid compute_mesh_sdf_cuda(
     int nx, int ny, int nz,
     float ox, float oy, float oz,
     float vx, float vy, float vz,
-    float* out_ms = nullptr
+    float* out_ms = nullptr,
+    bool voxelize_first = false,
+    int voxel_res = 256
 );
 
 DenseSdfGridDevice compute_mesh_sdf_device_cuda(
@@ -18,7 +20,9 @@ DenseSdfGridDevice compute_mesh_sdf_device_cuda(
     int nx, int ny, int nz,
     float ox, float oy, float oz,
     float vx, float vy, float vz,
-    float* out_ms = nullptr
+    float* out_ms = nullptr,
+    bool voxelize_first = false,
+    int voxel_res = 256
 );
 
 void free_mesh_sdf_device_cuda(DenseSdfGridDevice& device_grid);

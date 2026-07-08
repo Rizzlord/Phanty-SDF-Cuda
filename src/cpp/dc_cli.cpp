@@ -118,25 +118,24 @@ void generate_plane(DenseSdfGrid& grid, int res) {
 }
 
 #ifdef DC_ENABLE_CUDA
-static bool read_obj_to_sdf(const std::string& filepath, int res, DenseSdfGrid& grid) {
-    std::ifstream in(filepath);
+static bool read_obj_to_sdf(const std::string& filename, int res, DenseSdfGrid& grid, bool voxelize_first = false, int voxel_res = 256) {
+    std::ifstream in(filename);
     if (!in) return false;
 
     std::vector<float> vertices;
     std::vector<int> faces;
     std::string line;
     while (std::getline(in, line)) {
-        if (line.empty()) continue;
         if (line.size() >= 2 && line[0] == 'v' && line[1] == ' ') {
             float x, y, z;
-            if (sscanf(line.c_str(), "v %f %f %f", &x, &y, &z) == 3) {
+            if (sscanf(line.c_str() + 2, "%f %f %f", &x, &y, &z) == 3) {
                 vertices.push_back(x);
                 vertices.push_back(y);
                 vertices.push_back(z);
             }
         } else if (line.size() >= 2 && line[0] == 'f' && line[1] == ' ') {
             std::vector<int> face_indices;
-            char* ptr = (char*)line.c_str() + 2;
+            const char* ptr = line.c_str() + 2;
             while (*ptr) {
                 while (*ptr == ' ' || *ptr == '\t') ptr++;
                 if (!*ptr) break;
@@ -194,7 +193,10 @@ static bool read_obj_to_sdf(const std::string& filepath, int res, DenseSdfGrid& 
         faces.data(), num_faces,
         res, res, res,
         grid.ox, grid.oy, grid.oz,
-        grid.vx, grid.vy, grid.vz
+        grid.vx, grid.vy, grid.vz,
+        nullptr,
+        voxelize_first,
+        voxel_res
     );
     grid = std::move(computed);
     return true;
@@ -210,9 +212,11 @@ int main(int argc, char* argv[]) {
     bool benchmark = false;
     bool close_holes = false;
     bool remove_floaters = false;
+    bool voxelize_first = false;
     int res = 64;
     int brick_size = 8;
     int chunk_size = 0;
+    int voxel_res = -1;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -240,6 +244,10 @@ int main(int argc, char* argv[]) {
             close_holes = true;
         } else if (arg == "--remove-floaters") {
             remove_floaters = true;
+        } else if (arg == "-vf" || arg == "--voxelize-first") {
+            voxelize_first = true;
+        } else if (arg == "-vr" || arg == "--voxel-res") {
+            if (i + 1 < argc) voxel_res = std::stoi(argv[++i]);
         } else {
             if (input_file.empty()) {
                 input_file = arg;
@@ -249,6 +257,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (voxel_res < 0) voxel_res = res;
+    voxel_res = std::max(32, std::min(2048, voxel_res));
+
     if (output_file.empty() && !input_file.empty()) {
         output_file = input_file;
         input_file = "";
@@ -256,7 +267,7 @@ int main(int argc, char* argv[]) {
 
     if (output_file.empty()) {
         std::cerr << "Usage: " << argv[0] << " -i <input.obj|.sdf> -o <output.obj> [options]\n";
-        std::cerr << "Options: -b/--backend <cuda-sparse-mvdc|cuda-sparse|cuda|cpu>, -g/--res <int>, --close-holes, --remove-floaters\n";
+        std::cerr << "Options: -b/--backend <cuda-sparse-mvdc|cuda-sparse|cuda|cpu>, -g/--res <int>, --close-holes, --remove-floaters, --voxelize-first, --voxel-res <int>\n";
         return 1;
     }
 
@@ -279,7 +290,7 @@ int main(int argc, char* argv[]) {
 
         if (is_obj) {
 #ifdef DC_ENABLE_CUDA
-            if (!read_obj_to_sdf(input_file, res, grid)) {
+            if (!read_obj_to_sdf(input_file, res, grid, voxelize_first, voxel_res)) {
                 std::cerr << "Failed to convert OBJ to SDF from: " << input_file << "\n";
                 return 1;
             }

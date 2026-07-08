@@ -101,7 +101,28 @@
                 <input type="range" id="scale-slider" min="0.60" max="0.95" step="0.05" value="0.85" class="custom-slider">
             </div>
 
-            <h2 class="panel-title mt-6">3. Post-Processing</h2>
+            <h2 class="panel-title mt-6">3. Solid Voxelization & Cleanup</h2>
+
+            <div class="setting-group checkbox-group">
+                <label class="custom-checkbox-label">
+                    <input type="checkbox" id="voxelize-first-cb" class="custom-checkbox">
+                    <span class="checkbox-box"></span>
+                    <div class="checkbox-text">
+                        <span class="checkbox-title">Voxelize First (Clean Shell)</span>
+                        <span class="checkbox-desc">First voxelize mesh into a binary solid volume to permanently remove inner cavity geometry and floating debris before SDF generation.</span>
+                    </div>
+                </label>
+            </div>
+
+            <div class="setting-group mt-3" id="voxel-res-group">
+                <label for="voxel-res-slider" class="setting-label">
+                    <span>Voxel Grid Resolution</span>
+                    <span id="voxel-res-val" class="setting-value">256³</span>
+                </label>
+                <input type="range" id="voxel-res-slider" min="32" max="2048" step="32" value="256" class="custom-slider">
+            </div>
+
+            <h2 class="panel-title mt-6">4. Post-Processing</h2>
 
             <div class="setting-group checkbox-group">
                 <label class="custom-checkbox-label">

@@ -29,7 +29,9 @@ async def extract_mesh(
     brick_size: int = Form(8),
     scale_factor: float = Form(0.85),
     close_holes: bool = Form(False),
-    remove_floaters: bool = Form(False)
+    remove_floaters: bool = Form(False),
+    voxelize_first: bool = Form(False),
+    voxel_res: int = Form(256)
 ):
     try:
         if file is None or not hasattr(file, "read"):
@@ -44,6 +46,7 @@ async def extract_mesh(
 
         res = max(16, min(2048, int(res)))
         brick_size = 16 if brick_size == 16 else 8
+        voxel_res = max(32, min(2048, int(voxel_res)))
 
         binary_path = ROOT / "build" / "dc_cli"
         if not binary_path.exists():
@@ -64,6 +67,8 @@ async def extract_mesh(
                 "-b", backend,
                 "--brick-size", str(brick_size)
             ]
+            if voxelize_first:
+                cmd.extend(["--voxelize-first", "--voxel-res", str(voxel_res)])
             if close_holes:
                 cmd.append("--close-holes")
             if remove_floaters:

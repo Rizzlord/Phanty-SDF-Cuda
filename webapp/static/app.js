@@ -8,6 +8,9 @@ const resSlider = document.getElementById('res-slider');
 const resVal = document.getElementById('res-val');
 const scaleSlider = document.getElementById('scale-slider');
 const scaleVal = document.getElementById('scale-val');
+const voxelizeFirstCb = document.getElementById('voxelize-first-cb');
+const voxelResSlider = document.getElementById('voxel-res-slider');
+const voxelResVal = document.getElementById('voxel-res-val');
 const startBtn = document.getElementById('start-btn');
 const downloadBtn = document.getElementById('download-btn');
 const spinner = document.getElementById('spinner');
@@ -213,6 +216,12 @@ scaleSlider.addEventListener('input', (e) => {
     scaleVal.textContent = `${parseFloat(e.target.value).toFixed(2)}x`;
 });
 
+if (voxelResSlider && voxelResVal) {
+    voxelResSlider.addEventListener('input', (e) => {
+        voxelResVal.textContent = `${e.target.value}³`;
+    });
+}
+
 tabInput.addEventListener('click', () => switchTab('input'));
 tabOutput.addEventListener('click', () => {
     if (outputModel) switchTab('output');
@@ -242,6 +251,8 @@ startBtn.addEventListener('click', async () => {
         const brickSizeVal = document.querySelector('input[name="brick_size"]:checked').value;
         const removeFloatersVal = document.getElementById('remove-floaters-cb').checked;
         const closeHolesVal = document.getElementById('close-holes-cb').checked;
+        const voxelizeFirstVal = voxelizeFirstCb ? voxelizeFirstCb.checked : false;
+        const voxelResValInt = voxelResSlider ? voxelResSlider.value : 256;
 
         const formData = new FormData();
         formData.append('file', selectedFile);
@@ -251,6 +262,8 @@ startBtn.addEventListener('click', async () => {
         formData.append('scale_factor', scaleSlider.value);
         formData.append('remove_floaters', removeFloatersVal);
         formData.append('close_holes', closeHolesVal);
+        formData.append('voxelize_first', voxelizeFirstVal);
+        formData.append('voxel_res', voxelResValInt);
 
 
         const res = await fetch('/api/extract', {
