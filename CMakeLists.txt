@@ -105,13 +105,17 @@ if(DC_CUDA_FOUND)
     target_compile_definitions(dc_tests PRIVATE DC_ENABLE_CUDA)
 endif()
 
-find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
-execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
-    OUTPUT_VARIABLE pybind11_DIR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-find_package(pybind11 REQUIRED PATHS ${pybind11_DIR} NO_DEFAULT_PATH)
+find_package(Python3 COMPONENTS Interpreter Development QUIET)
+if(Python3_FOUND)
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
+        OUTPUT_VARIABLE pybind11_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(pybind11_DIR)
+        find_package(pybind11 QUIET PATHS ${pybind11_DIR} NO_DEFAULT_PATH)
+    endif()
+endif()
 
 if(pybind11_FOUND)
     pybind11_add_module(contouring_py src/cpp/bindings.cpp)
