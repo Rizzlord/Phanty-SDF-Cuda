@@ -253,6 +253,8 @@ startBtn.addEventListener('click', async () => {
         const closeHolesVal = document.getElementById('close-holes-cb').checked;
         const voxelizeFirstVal = voxelizeFirstCb ? voxelizeFirstCb.checked : false;
         const voxelResValInt = voxelResSlider ? voxelResSlider.value : 256;
+        const postDcCb = document.getElementById('post-dc-voxelize-cb');
+        const postDcVal = postDcCb ? postDcCb.checked : false;
 
         const formData = new FormData();
         formData.append('file', selectedFile);
@@ -264,6 +266,7 @@ startBtn.addEventListener('click', async () => {
         formData.append('close_holes', closeHolesVal);
         formData.append('voxelize_first', voxelizeFirstVal);
         formData.append('voxel_res', voxelResValInt);
+        formData.append('post_dc_voxelize', postDcVal);
 
 
         const res = await fetch('/api/extract', {

@@ -108,7 +108,7 @@
                     <input type="checkbox" id="voxelize-first-cb" class="custom-checkbox">
                     <span class="checkbox-box"></span>
                     <div class="checkbox-text">
-                        <span class="checkbox-title">Voxelize First (Clean Shell)</span>
+                        <span class="checkbox-title">Voxelize Clean Shell</span>
                         <span class="checkbox-desc">First voxelize mesh into a binary solid volume to permanently remove inner cavity geometry and floating debris before SDF generation.</span>
                     </div>
                 </label>
@@ -120,6 +120,17 @@
                     <span id="voxel-res-val" class="setting-value">256³</span>
                 </label>
                 <input type="range" id="voxel-res-slider" min="32" max="2048" step="32" value="256" class="custom-slider">
+            </div>
+
+            <div class="setting-group checkbox-group mt-3" id="post-dc-voxelize-group">
+                <label class="custom-checkbox-label">
+                    <input type="checkbox" id="post-dc-voxelize-cb" class="custom-checkbox">
+                    <span class="checkbox-box"></span>
+                    <div class="checkbox-text">
+                        <span class="checkbox-title">Post-DC Voxelize Polish</span>
+                        <span class="checkbox-desc">Runs a second pass of voxelization and extraction on the Dual Contouring output using Voxel Resolution to guarantee a 100% watertight closed shell without seams.</span>
+                    </div>
+                </label>
             </div>
 
             <h2 class="panel-title mt-6">4. Post-Processing</h2>

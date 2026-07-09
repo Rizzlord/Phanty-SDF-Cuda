@@ -31,7 +31,8 @@ async def extract_mesh(
     close_holes: bool = Form(False),
     remove_floaters: bool = Form(False),
     voxelize_first: bool = Form(False),
-    voxel_res: int = Form(256)
+    voxel_res: int = Form(256),
+    post_dc_voxelize: bool = Form(False)
 ):
     try:
         if file is None or not hasattr(file, "read"):
@@ -71,10 +72,33 @@ async def extract_mesh(
                 cmd.extend(["--voxelize-first", "--voxel-res", str(voxel_res)])
             if close_holes:
                 cmd.append("--close-holes")
-            if remove_floaters:
+            if remove_floaters and not post_dc_voxelize:
                 cmd.append("--remove-floaters")
 
             proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+            if post_dc_voxelize and os.path.exists(temp_out):
+                temp_in_2 = os.path.join(tmpdir, "in2.obj")
+                temp_out_2 = os.path.join(tmpdir, "out2.obj")
+                os.rename(temp_out, temp_in_2)
+                cmd_2 = [
+                    str(binary_path),
+                    "-i", temp_in_2,
+                    "-o", temp_out_2,
+                    "-g", str(voxel_res),
+                    "-b", backend,
+                    "--brick-size", str(brick_size),
+                    "--voxelize-first",
+                    "--voxel-res", str(voxel_res)
+                ]
+                if remove_floaters:
+                    cmd_2.append("--remove-floaters")
+                if close_holes:
+                    cmd_2.append("--close-holes")
+                proc_2 = subprocess.run(cmd_2, capture_output=True, text=True, check=True)
+                if os.path.exists(temp_out_2):
+                    os.rename(temp_out_2, temp_out)
+
             total_ms = (time.time() - t0) * 1000.0
 
             active_bricks = 0
