@@ -50,8 +50,12 @@ async def extract_mesh(
         voxel_res = max(32, min(2048, int(voxel_res)))
 
         binary_path = ROOT / "build" / "dc_cli"
+        if sys.platform == "win32":
+            binary_path = ROOT / "build" / "Release" / "dc_cli.exe"
+            if not binary_path.exists():
+                binary_path = ROOT / "build" / "dc_cli.exe"
         if not binary_path.exists():
-            raise RuntimeError(f"dc_cli binary not found at {binary_path}. Please run make dc_cli.")
+            raise RuntimeError(f"dc_cli binary not found at {binary_path}. Please build the project.")
 
         t0 = time.time()
         with tempfile.TemporaryDirectory() as tmpdir:
