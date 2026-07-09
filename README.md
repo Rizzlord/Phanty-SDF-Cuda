@@ -11,41 +11,66 @@ We propose an algorithm to reconstruct explicit polygonal meshes from discretely
 ![Teaser](images/teaser.png)
 
 
-## Installation
+## Installation & Building
 
-### 1. Clone with submodules
+### 1. Requirements for Building `dc_cli`
+
+#### Windows Requirements
+To compile the high-performance CUDA Dual Contouring CLI (`dc_cli.exe`) on Windows, you only need:
+1. **Visual Studio C++ Build Tools (`2019 or 2022`)** — [Free Download](https://visualstudio.microsoft.com/visual-cpp-build-tools/). Ensure **"Desktop development with C++"** (`MSVC v143 or v142 C++ x64 build tools and Windows SDK`) is selected.
+2. **NVIDIA CUDA Toolkit (`11.8 or 12.x`)** — [Free Download](https://developer.nvidia.com/cuda-downloads?target_os=Windows). Required for compiling GPU CUDA kernels. Install MSVC Build Tools first so NVIDIA registers MSVC integration automatically.
+3. **CMake & Git** — Install via PowerShell: `winget install Kitware.CMake` and `winget install Git.Git` (`or download installers and add CMake to PATH`).
+*Note: Python C++ development headers (`pybind11`) are **100% optional**; you do not need Python dev tools installed just to build `dc_cli.exe`.*
+
+#### Linux / macOS Requirements
+- **Linux**: `gcc/g++` (`>= 9`), `cmake` (`>= 3.18`), `git`, and **NVIDIA CUDA Toolkit** (`for GPU acceleration`).
+- **macOS**: `Xcode Command Line Tools` (`xcode-select --install`), `cmake`, and `git`.
+
+---
+
+### 2. One-Click Automatic Setup Scripts (`Recommended`)
+
+We provide ready-to-use setup scripts for all major operating systems that automatically update git submodules, configure CMake (`x64 Release, headless mode`), and compile `dc_cli` using multi-core parallelism:
+
+#### Windows PowerShell
+Open PowerShell in the repository root and run:
+```powershell
+.\setup.ps1
+```
+*Outputs compiled binary directly to `build\Release\dc_cli.exe`.*
+
+#### Windows Command Prompt (`CMD.exe`)
+Open CMD (`or double-click the script if running from cmd`) and run:
+```cmd
+setup.bat
+```
+
+#### Linux & macOS (`Bash/Zsh`)
+Run inside your terminal:
+```bash
+chmod +x setup.sh && ./setup.sh
+```
+*Outputs compiled binary directly to `build/dc_cli`.*
+
+---
+
+### 3. Manual Build (`CMake`)
+
+If you prefer configuring manually or building optional Python bindings (`contouring_py`) and Polyscope GUI (`dc_viewer`):
 
 ```bash
 git clone --recursive https://github.com/xianacarrera/dcsdd.git
 cd dcsdd
-```
-
-### 2. Set up a Python environment
-
-We recommend [conda](https://docs.conda.io/) with Python 3.13:
-
-```bash
-conda create -n dcsdd python=3.13 pip -y
-conda activate dcsdd
-pip install -r requirements.txt
-```
-
-### 3. Build the C++ library, CUDA backend, and Python bindings
-
-You can build the headless core library, optional CUDA backend, standalone command-line tool (`dc_cli`), unit tests (`dc_tests`), and Python extension module using CMake:
-
-```bash
-mkdir -p build
-cd build
+mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DDC_ENABLE_CUDA=ON -DDC_ENABLE_VIEWER=OFF
-cmake --build . -j
+cmake --build . --target dc_cli --config Release -j
 cd ..
 ```
 
 This compiles:
 - `dc_core`: Headless CPU dual contouring and SDF mesh extraction core.
 - `dc_cuda`: Fast GPU pipeline (`markActiveCells`, `exclusive_scan` stream compaction, batched QEF solver, quad-to-triangle face emission).
-- `dc_cli`: Command-line tool for headless mesh extraction and benchmarking.
+- `dc_cli`: Standalone command-line tool for headless mesh extraction, solid shell voxelization, and benchmarking.
 - `dc_tests`: Deterministic topology and boundary condition unit tests.
 - `contouring_py`: Python module (`src/python/contouring/_contouring_cpp_module*.so`) exposing `DenseSdfGrid`, `CpuDualContouringBackend`, and `CudaDualContouringBackend`.
 
@@ -63,15 +88,29 @@ All scripts should be run from the **repository root**.
 
 #### Command-Line Interface (`dc_cli`)
 
-You can run mesh extraction directly from the command line using `.sdf` binary grid files or procedural shapes (`sphere`, `box`, `plane`):
+You can run mesh extraction directly from the command line using `.sdf` binary grid files, raw 3D meshes (`.obj`, `.ply`, `.stl`), or procedural shapes (`sphere`, `box`, `plane`):
 
 ```bash
+# Basic GPU extraction from procedural sphere
 ./build/dc_cli --generate sphere output_sphere.obj --backend cuda --grid-size 128 --benchmark
 ```
 
 ```bash
-./build/dc_cli input_grid.sdf extracted_mesh.obj --backend cuda --benchmark
+# Extract watertight solid shell from raw mesh (Voxelize Clean Shell + Remove Floaters + Close Holes)
+./build/dc_cli -i input_mesh.obj -o extracted_mesh.obj -g 512 --backend cuda --voxelize-first --voxel-res 512 --remove-floaters --close-holes
 ```
+
+| Flag | Description |
+|---|---|
+| `-i, --input <file>` | Input mesh or `.sdf` grid file |
+| `-o, --output <file>` | Output `.obj` file path |
+| `-g, --grid-size <N>` | SDF sampling grid resolution (`default: 128`) |
+| `-b, --backend <cpu/cuda/sparse>` | Backend solver (`cuda_sparse` or `cuda` recommended) |
+| `--voxelize-first` (`Voxelize Clean Shell`) | First voxelize mesh into a solid binary volume to permanently remove internal cavity geometry and floating debris before SDF generation |
+| `--voxel-res <N>` | Voxel grid resolution for `--voxelize-first` (`default: 256`) |
+| `--remove-floaters` | Post-processing pass that removes disconnected floating island debris, keeping only the largest connected surface |
+| `--close-holes` | Post-processing pass that identifies boundary loops and seals non-manifold/open boundary edges to guarantee watertightness |
+| `--benchmark` | Print detailed stage-by-stage timing breakdowns in milliseconds |
 
 #### Python Backends (`CpuDualContouringBackend` / `CudaDualContouringBackend`)
 
